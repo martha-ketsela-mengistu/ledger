@@ -10,7 +10,7 @@ docker run -d -e POSTGRES_PASSWORD=apex -e POSTGRES_DB=apex_ledger -p 5432:5432 
 
 # 3. Set environment
 cp .env.example .env
-# Edit .env — add your ANTHROPIC_API_KEY
+# Edit .env — add your OLLAMA_API_KEY
 
 # 4. Generate all data (companies + documents + seed events → DB)
 python datagen/generate_all.py --db-url postgresql://postgres:apex@localhost/apex_ledger
