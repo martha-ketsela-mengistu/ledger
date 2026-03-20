@@ -35,26 +35,26 @@ async def test_append_new_stream_succeeds():
         [_ev("ApplicationSubmitted", application_id="APEX-0001")],
         expected_version=-1,
     )
-    assert positions == [0]
-    assert await store.stream_version("loan-APEX-0001") == 0
+    assert positions == [1]
+    assert await store.stream_version("loan-APEX-0001") == 1
 
 @pytest.mark.asyncio
 async def test_append_increments_version():
     store = InMemoryEventStore()
     await store.append("s", [_ev("E1")], expected_version=-1)
-    await store.append("s", [_ev("E2")], expected_version=0)
-    await store.append("s", [_ev("E3")], expected_version=1)
-    assert await store.stream_version("s") == 2
+    await store.append("s", [_ev("E2")], expected_version=1)
+    await store.append("s", [_ev("E3")], expected_version=2)
+    assert await store.stream_version("s") == 3
 
 @pytest.mark.asyncio
 async def test_append_wrong_version_raises():
     store = InMemoryEventStore()
     await store.append("s", [_ev("E1")], expected_version=-1)
     with pytest.raises(OptimisticConcurrencyError) as exc_info:
-        await store.append("s", [_ev("E2")], expected_version=-1)  # should be 0
+        await store.append("s", [_ev("E2")], expected_version=-1)  # should be 1
     assert exc_info.value.stream_id == "s"
     assert exc_info.value.expected == -1
-    assert exc_info.value.actual == 0
+    assert exc_info.value.actual == 1
 
 @pytest.mark.asyncio
 async def test_concurrent_double_append_exactly_one_succeeds():
@@ -65,7 +65,7 @@ async def test_concurrent_double_append_exactly_one_succeeds():
     results = []
     async def attempt():
         try:
-            await store.append("s", [_ev("Concurrent")], expected_version=0)
+            await store.append("s", [_ev("Concurrent")], expected_version=1)
             results.append("success")
         except OptimisticConcurrencyError:
             results.append("occ")
@@ -73,7 +73,7 @@ async def test_concurrent_double_append_exactly_one_succeeds():
     await asyncio.gather(attempt(), attempt())
     assert results.count("success") == 1, "Exactly one concurrent append must succeed"
     assert results.count("occ") == 1
-    assert await store.stream_version("s") == 1
+    assert await store.stream_version("s") == 2
 
 @pytest.mark.asyncio
 async def test_load_stream_returns_events_in_order():
@@ -85,7 +85,7 @@ async def test_load_stream_returns_events_in_order():
     events = await store.load_stream("s")
     assert len(events) == 5
     for i, ev in enumerate(events):
-        assert ev["stream_position"] == i
+        assert ev["stream_position"] == i + 1
         assert ev["event_type"] == f"Event{i}"
 
 @pytest.mark.asyncio
@@ -95,9 +95,9 @@ async def test_load_stream_with_from_position():
         ver = await store.stream_version("s")
         await store.append("s", [_ev(f"E{i}")], expected_version=ver)
 
-    events = await store.load_stream("s", from_position=2)
+    events = await store.load_stream("s", from_position=3)
     assert len(events) == 3
-    assert events[0]["stream_position"] == 2
+    assert events[0]["stream_position"] == 3
 
 @pytest.mark.asyncio
 async def test_load_all_yields_all_events_globally():
@@ -120,8 +120,8 @@ async def test_append_multiple_events_in_one_call():
     store = InMemoryEventStore()
     events = [_ev(f"E{i}") for i in range(3)]
     positions = await store.append("s", events, expected_version=-1)
-    assert positions == [0, 1, 2]
-    assert await store.stream_version("s") == 2
+    assert positions == [1, 2, 3]
+    assert await store.stream_version("s") == 3
 
 
 # ─── EVENT SCHEMA CONFORMANCE ─────────────────────────────────────────────────

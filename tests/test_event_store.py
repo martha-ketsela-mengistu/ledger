@@ -1,5 +1,5 @@
 import pytest
-pytestmark = pytest.mark.skip(reason="Requires PostgreSQL")
+# Enabled for PostgreSQL implementation
 """
 tests/test_event_store.py
 =========================
@@ -13,11 +13,15 @@ import asyncio, pytest, sys
 from pathlib import Path; sys.path.insert(0, str(Path(__file__).parent.parent))
 from ledger.event_store import EventStore, OptimisticConcurrencyError
 
-DB_URL = "postgresql://localhost/apex_ledger"
+DB_URL = "postgresql://postgres:apex@localhost/apex_ledger"
 
 @pytest.fixture
 async def store():
     s = EventStore(DB_URL); await s.connect()
+    # Cleanup before each test
+    async with s._pool.acquire() as conn:
+        await conn.execute("TRUNCATE events, event_streams, outbox CASCADE")
+    
     yield s
     await s.close()
 

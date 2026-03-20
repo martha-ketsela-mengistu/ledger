@@ -10,7 +10,7 @@ COMPLETION CHECKLIST (implement in order):
 """
 from __future__ import annotations
 import json
-from datetime import datetime
+from datetime import datetime, UTC
 from typing import AsyncGenerator
 from uuid import UUID
 import asyncpg
@@ -47,16 +47,12 @@ class EventStore:
         if self._pool: await self._pool.close()
 
     async def stream_version(self, stream_id: str) -> int:
-        """
-        Returns current version, or -1 if stream doesn't exist.
-        IMPLEMENT:
-            async with self._pool.acquire() as conn:
-                row = await conn.fetchrow(
-                    "SELECT current_version FROM event_streams WHERE stream_id = $1",
-                    stream_id)
-                return row["current_version"] if row else -1
-        """
-        raise NotImplementedError("Implement stream_version()")
+        """Returns current version, or -1 if stream doesn't exist."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT current_version FROM event_streams WHERE stream_id = $1",
+                stream_id)
+            return row["current_version"] if row else -1
 
     async def append(
         self,
@@ -66,11 +62,7 @@ class EventStore:
         causation_id: str | None = None,
         metadata: dict | None = None,
     ) -> list[int]:
-        """
-        Appends events atomically with OCC. Returns list of positions assigned.
-
-        FULL IMPLEMENTATION GUIDE — copy, uncomment, and complete:
-
+        """Appends events atomically with OCC and writes to outbox."""
         async with self._pool.acquire() as conn:
             async with conn.transaction():
                 # 1. Lock stream row (prevents concurrent appends)
@@ -90,30 +82,37 @@ class EventStore:
                         " VALUES($1, $2, 0)",
                         stream_id, stream_id.split("-")[0])
 
-                # 4. Insert each event
+                # 4. Insert each event and outbox entry
                 positions = []
                 meta = {**(metadata or {})}
                 if causation_id: meta["causation_id"] = causation_id
+                
+                start_pos = (0 if current == -1 else current) + 1
                 for i, event in enumerate(events):
-                    pos = expected_version + 1 + i
-                    await conn.execute(
+                    pos = start_pos + i
+                    event_id = await conn.fetchval(
                         "INSERT INTO events(stream_id, stream_position, event_type,"
                         " event_version, payload, metadata, recorded_at)"
-                        " VALUES($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7)",
+                        " VALUES($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7) RETURNING event_id",
                         stream_id, pos,
-                        event["event_type"], event["event_version"],
+                        event["event_type"], event.get("event_version", 1),
                         json.dumps(event["payload"]),
                         json.dumps(meta),
-                        datetime.utcnow())
+                        datetime.now(UTC))
+                    
+                    # Outbox write
+                    await conn.execute(
+                        "INSERT INTO outbox(event_id, destination, payload)"
+                        " VALUES($1, $2, $3::jsonb)",
+                        event_id, event["event_type"], json.dumps(event["payload"]))
+                        
                     positions.append(pos)
 
                 # 5. Update stream version
                 await conn.execute(
                     "UPDATE event_streams SET current_version=$1 WHERE stream_id=$2",
-                    expected_version + len(events), stream_id)
+                    start_pos + len(events) - 1, stream_id)
                 return positions
-        """
-        raise NotImplementedError("Implement append()")
 
     async def load_stream(
         self,
@@ -121,71 +120,69 @@ class EventStore:
         from_position: int = 0,
         to_position: int | None = None,
     ) -> list[dict]:
-        """
-        Loads events from a stream in stream_position order.
-        Applies upcasters if self.upcasters is set.
-
-        IMPLEMENT:
-            async with self._pool.acquire() as conn:
-                q = ("SELECT event_id, stream_id, stream_position, event_type,"
-                     " event_version, payload, metadata, recorded_at"
-                     " FROM events WHERE stream_id=$1 AND stream_position>=$2")
-                params = [stream_id, from_position]
-                if to_position is not None:
-                    q += " AND stream_position<=$3"; params.append(to_position)
-                q += " ORDER BY stream_position ASC"
-                rows = await conn.fetch(q, *params)
-                events = []
-                for row in rows:
-                    e = {**dict(row), "payload": dict(row["payload"]),
-                                       "metadata": dict(row["metadata"])}
-                    if self.upcasters: e = self.upcasters.upcast(e)
-                    events.append(e)
-                return events
-        """
-        raise NotImplementedError("Implement load_stream()")
+        """Loads events from a stream in stream_position order."""
+        async with self._pool.acquire() as conn:
+            q = ("SELECT event_id, stream_id, stream_position, event_type,"
+                 " event_version, payload, metadata, recorded_at"
+                 " FROM events WHERE stream_id=$1 AND stream_position>=$2")
+            params = [stream_id, from_position]
+            if to_position is not None:
+                q += " AND stream_position<=$3"; params.append(to_position)
+            q += " ORDER BY stream_position ASC"
+            rows = await conn.fetch(q, *params)
+            events = []
+            for row in rows:
+                e = {**dict(row), "payload": dict(json.loads(row["payload"]) if isinstance(row["payload"], str) else row["payload"]),
+                                   "metadata": dict(json.loads(row["metadata"]) if isinstance(row["metadata"], str) else row["metadata"])}
+                if self.upcasters: e = self.upcasters.upcast(e)
+                events.append(e)
+            return events
 
     async def load_all(
         self, from_position: int = 0, batch_size: int = 500
     ) -> AsyncGenerator[dict, None]:
-        """
-        Async generator yielding all events by global_position.
-        Used by the ProjectionDaemon.
-
-        IMPLEMENT:
-            async with self._pool.acquire() as conn:
-                pos = from_position
-                while True:
-                    rows = await conn.fetch(
-                        "SELECT global_position, stream_id, stream_position,"
-                        " event_type, event_version, payload, metadata, recorded_at"
-                        " FROM events WHERE global_position > $1"
-                        " ORDER BY global_position ASC LIMIT $2",
-                        pos, batch_size)
-                    if not rows: break
-                    for row in rows:
-                        e = {**dict(row), "payload": dict(row["payload"]),
-                                           "metadata": dict(row["metadata"])}
-                        yield e
-                    pos = rows[-1]["global_position"]
-                    if len(rows) < batch_size: break
-        """
-        raise NotImplementedError("Implement load_all()")
-        if False: yield {}  # makes Python treat this as a generator
+        """Async generator yielding all events by global_position."""
+        async with self._pool.acquire() as conn:
+            pos = from_position
+            while True:
+                rows = await conn.fetch(
+                    "SELECT global_position, stream_id, stream_position,"
+                    " event_type, event_version, payload, metadata, recorded_at"
+                    " FROM events WHERE global_position > $1"
+                    " ORDER BY global_position ASC LIMIT $2",
+                    pos, batch_size)
+                if not rows: break
+                for row in rows:
+                    e = {**dict(row), "payload": dict(json.loads(row["payload"]) if isinstance(row["payload"], str) else row["payload"]),
+                                       "metadata": dict(json.loads(row["metadata"]) if isinstance(row["metadata"], str) else row["metadata"])}
+                    yield e
+                pos = rows[-1]["global_position"]
+                if len(rows) < batch_size: break
 
     async def get_event(self, event_id: UUID) -> dict | None:
-        """
-        Loads one event by UUID. Used for causation chain lookups.
+        """Loads one event by UUID. Used for causation chain lookups."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM events WHERE event_id=$1", event_id)
+            if not row: return None
+            return {**dict(row), "payload": dict(json.loads(row["payload"]) if isinstance(row["payload"], str) else row["payload"]),
+                                  "metadata": dict(json.loads(row["metadata"]) if isinstance(row["metadata"], str) else row["metadata"])}
 
-        IMPLEMENT:
-            async with self._pool.acquire() as conn:
-                row = await conn.fetchrow(
-                    "SELECT * FROM events WHERE event_id=$1", event_id)
-                if not row: return None
-                return {**dict(row), "payload": dict(row["payload"]),
-                                      "metadata": dict(row["metadata"])}
-        """
-        raise NotImplementedError("Implement get_event()")
+    async def archive_stream(self, stream_id: str) -> None:
+        """Marks a stream as archived."""
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE event_streams SET archived_at = NOW() WHERE stream_id = $1",
+                stream_id)
+
+    async def get_stream_metadata(self, stream_id: str) -> dict | None:
+        """Returns the metadata for a stream."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT metadata FROM event_streams WHERE stream_id = $1",
+                stream_id)
+            if not row: return None
+            return dict(json.loads(row["metadata"]) if isinstance(row["metadata"], str) else row["metadata"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -272,8 +269,9 @@ class InMemoryEventStore:
 
         self._streams.setdefault(stream_id, [])
         positions = []
+        start_pos = (0 if current == -1 else current) + 1
         for i, event in enumerate(events):
-            pos = expected_version + 1 + i
+            pos = start_pos + i
             stored = {
                 "event_id": str(__import__("uuid").uuid4()),
                 "stream_id": stream_id,
@@ -283,7 +281,7 @@ class InMemoryEventStore:
                 "event_version": event.get("event_version", 1),
                 "payload": dict(event.get("payload", {})),
                 "metadata": {**(metadata or {}), **({"causation_id": causation_id} if causation_id else {})},
-                "recorded_at": __import__("datetime").datetime.utcnow(),
+                "recorded_at": __import__("datetime").datetime.now(__import__("datetime").UTC),
             }
             self._streams[stream_id].append(stored)
             self._global.append(stored)
@@ -325,7 +323,7 @@ class InMemoryEventStore:
 
 import asyncio as _asyncio
 from collections import defaultdict as _defaultdict
-from datetime import datetime as _datetime
+from datetime import datetime as _datetime, UTC as _UTC
 from uuid import uuid4 as _uuid4
 
 class InMemoryEventStore:
@@ -368,8 +366,9 @@ class InMemoryEventStore:
             if causation_id:
                 meta["causation_id"] = causation_id
 
+            start_pos = (0 if current == -1 else current) + 1
             for i, event in enumerate(events):
-                pos = current + 1 + i
+                pos = start_pos + i
                 stored = {
                     "event_id": str(_uuid4()),
                     "stream_id": stream_id,
@@ -379,13 +378,13 @@ class InMemoryEventStore:
                     "event_version": event.get("event_version", 1),
                     "payload": dict(event.get("payload", {})),
                     "metadata": meta,
-                    "recorded_at": _datetime.utcnow().isoformat(),
+                    "recorded_at": _datetime.now(_UTC).isoformat(),
                 }
                 self._streams[stream_id].append(stored)
                 self._global.append(stored)
                 positions.append(pos)
 
-            self._versions[stream_id] = current + len(events)
+            self._versions[stream_id] = start_pos + len(events) - 1
             return positions
 
     async def load_stream(
