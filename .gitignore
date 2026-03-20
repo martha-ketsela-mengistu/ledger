@@ -1,0 +1,13 @@
+docs/
+data/
+artifacts/pdf_text/
+.env
+__pycache__/
+.vscode/
+.DS_Store
+.specify/scripts
+.specify/templates
+.cursor
+.agent
+.antigravity
+lib/
