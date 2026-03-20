@@ -408,6 +408,14 @@ class AgentSessionStarted(BaseEvent):
     context_token_count: int
     started_at: datetime
 
+class AgentContextLoaded(BaseEvent):
+    """Enforces the Gas Town requirement: agent must declare its context before working."""
+    event_type: str = "AgentContextLoaded"
+    session_id: str
+    context_source: str
+    context_hash: str
+    loaded_at: datetime
+
 class AgentInputValidated(BaseEvent):
     event_type: str = "AgentInputValidated"
     session_id: str
@@ -681,6 +689,7 @@ EVENT_REGISTRY: dict[str, type[BaseEvent]] = {
     "PackageReadyForAnalysis": PackageReadyForAnalysis,
     # AgentSession
     "AgentSessionStarted": AgentSessionStarted,
+    "AgentContextLoaded": AgentContextLoaded,
     "AgentInputValidated": AgentInputValidated,
     "AgentInputValidationFailed": AgentInputValidationFailed,
     "AgentNodeExecuted": AgentNodeExecuted,

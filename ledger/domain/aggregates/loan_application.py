@@ -21,29 +21,31 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 class ApplicationState(str, Enum):
-    NEW = "NEW"; SUBMITTED = "SUBMITTED"; DOCUMENTS_PENDING = "DOCUMENTS_PENDING"
-    DOCUMENTS_UPLOADED = "DOCUMENTS_UPLOADED"; DOCUMENTS_PROCESSED = "DOCUMENTS_PROCESSED"
-    CREDIT_ANALYSIS_REQUESTED = "CREDIT_ANALYSIS_REQUESTED"; CREDIT_ANALYSIS_COMPLETE = "CREDIT_ANALYSIS_COMPLETE"
-    FRAUD_SCREENING_REQUESTED = "FRAUD_SCREENING_REQUESTED"; FRAUD_SCREENING_COMPLETE = "FRAUD_SCREENING_COMPLETE"
-    COMPLIANCE_CHECK_REQUESTED = "COMPLIANCE_CHECK_REQUESTED"; COMPLIANCE_CHECK_COMPLETE = "COMPLIANCE_CHECK_COMPLETE"
-    PENDING_DECISION = "PENDING_DECISION"; PENDING_HUMAN_REVIEW = "PENDING_HUMAN_REVIEW"
-    APPROVED = "APPROVED"; DECLINED = "DECLINED"; DECLINED_COMPLIANCE = "DECLINED_COMPLIANCE"
-    REFERRED = "REFERRED"
+    NEW = "NEW"
+    SUBMITTED = "SUBMITTED"
+    AWAITING_ANALYSIS = "AWAITING_ANALYSIS"
+    ANALYSIS_COMPLETE = "ANALYSIS_COMPLETE"
+    COMPLIANCE_REVIEW = "COMPLIANCE_REVIEW"
+    PENDING_DECISION = "PENDING_DECISION"
+    APPROVED_PENDING_HUMAN = "APPROVED_PENDING_HUMAN"
+    DECLINED_PENDING_HUMAN = "DECLINED_PENDING_HUMAN"
+    FINAL_APPROVED = "FINAL_APPROVED"
+    FINAL_DECLINED = "FINAL_DECLINED"
 
 VALID_TRANSITIONS = {
     ApplicationState.NEW: [ApplicationState.SUBMITTED],
-    ApplicationState.SUBMITTED: [ApplicationState.DOCUMENTS_PENDING],
-    ApplicationState.DOCUMENTS_PENDING: [ApplicationState.DOCUMENTS_UPLOADED],
-    ApplicationState.DOCUMENTS_UPLOADED: [ApplicationState.DOCUMENTS_PROCESSED],
-    ApplicationState.DOCUMENTS_PROCESSED: [ApplicationState.CREDIT_ANALYSIS_REQUESTED],
-    ApplicationState.CREDIT_ANALYSIS_REQUESTED: [ApplicationState.CREDIT_ANALYSIS_COMPLETE],
-    ApplicationState.CREDIT_ANALYSIS_COMPLETE: [ApplicationState.FRAUD_SCREENING_REQUESTED],
-    ApplicationState.FRAUD_SCREENING_REQUESTED: [ApplicationState.FRAUD_SCREENING_COMPLETE],
-    ApplicationState.FRAUD_SCREENING_COMPLETE: [ApplicationState.COMPLIANCE_CHECK_REQUESTED],
-    ApplicationState.COMPLIANCE_CHECK_REQUESTED: [ApplicationState.COMPLIANCE_CHECK_COMPLETE],
-    ApplicationState.COMPLIANCE_CHECK_COMPLETE: [ApplicationState.PENDING_DECISION, ApplicationState.DECLINED_COMPLIANCE],
-    ApplicationState.PENDING_DECISION: [ApplicationState.APPROVED, ApplicationState.DECLINED, ApplicationState.PENDING_HUMAN_REVIEW],
-    ApplicationState.PENDING_HUMAN_REVIEW: [ApplicationState.APPROVED, ApplicationState.DECLINED],
+    ApplicationState.SUBMITTED: [ApplicationState.AWAITING_ANALYSIS],
+    ApplicationState.AWAITING_ANALYSIS: [ApplicationState.ANALYSIS_COMPLETE],
+    ApplicationState.ANALYSIS_COMPLETE: [ApplicationState.COMPLIANCE_REVIEW],
+    ApplicationState.COMPLIANCE_REVIEW: [ApplicationState.PENDING_DECISION, ApplicationState.FINAL_DECLINED], # DeclinedCompliance case
+    ApplicationState.PENDING_DECISION: [
+        ApplicationState.APPROVED_PENDING_HUMAN, 
+        ApplicationState.DECLINED_PENDING_HUMAN,
+        ApplicationState.FINAL_APPROVED, 
+        ApplicationState.FINAL_DECLINED
+    ],
+    ApplicationState.APPROVED_PENDING_HUMAN: [ApplicationState.FINAL_APPROVED, ApplicationState.FINAL_DECLINED],
+    ApplicationState.DECLINED_PENDING_HUMAN: [ApplicationState.FINAL_APPROVED, ApplicationState.FINAL_DECLINED],
 }
 
 @dataclass
@@ -54,32 +56,115 @@ class LoanApplicationAggregate:
     requested_amount_usd: float | None = None
     loan_purpose: str | None = None
     version: int = 0
-    events: list[dict] = field(default_factory=list)
+    decision_generated: bool = False
+    credit_analysis_complete: bool = False
+    compliance_passed: bool = False
+    human_review_override: bool = False
+    decision_sessions: set[str] = field(default_factory=set)
 
     @classmethod
     async def load(cls, store, application_id: str) -> "LoanApplicationAggregate":
         """Load and replay event stream to rebuild aggregate state."""
         agg = cls(application_id=application_id)
-        # TODO: stream_events = await store.load_stream(f"loan-{application_id}")
-        # TODO: for event in stream_events: agg.apply(event)
+        stream_id = f"loan-{application_id}"
+        events = await store.load_stream(stream_id)
+        for event in events:
+            agg.apply(event)
         return agg
 
     def apply(self, event: dict) -> None:
-        """Apply one event to update aggregate state. TODO: implement for each event type."""
-        et = event.get("event_type"); p = event.get("payload", {})
-        self.version += 1
-        if et == "ApplicationSubmitted":
-            self.state = ApplicationState.SUBMITTED
-            self.applicant_id = p.get("applicant_id")
-            self.requested_amount_usd = p.get("requested_amount_usd")
-            self.loan_purpose = p.get("loan_purpose")
-        elif et == "DocumentUploadRequested":
-            self.state = ApplicationState.DOCUMENTS_PENDING
-        elif et == "DocumentUploaded":
-            self.state = ApplicationState.DOCUMENTS_UPLOADED
-        # TODO: implement remaining transitions
+        """Apply one event to update aggregate state."""
+        et = event.get("event_type")
+        method_name = f"_apply_{et}"
+        if hasattr(self, method_name):
+            getattr(self, method_name)(event)
+        
+        # Always increment version based on stream position if available
+        if "stream_position" in event:
+            self.version = event["stream_position"]
+        else:
+            self.version += 1
+
+    def _apply_ApplicationSubmitted(self, event: dict) -> None:
+        p = event.get("payload", {})
+        self.state = ApplicationState.SUBMITTED
+        self.applicant_id = p.get("applicant_id")
+        self.requested_amount_usd = p.get("requested_amount_usd")
+        self.loan_purpose = p.get("loan_purpose")
+
+    def _apply_ExtractionCompleted(self, event: dict) -> None:
+        # Implicitly transitions to AwaitingAnalysis when processing completes
+        # This might be triggered via a domain event or a command
+        pass
+
+    def _apply_CreditAnalysisRequested(self, event: dict) -> None:
+        self.state = ApplicationState.AWAITING_ANALYSIS
+
+    def _apply_CreditAnalysisCompleted(self, event: dict) -> None:
+        # Rule 3: Model version locking (handled in command validation but state reflects it)
+        self.state = ApplicationState.ANALYSIS_COMPLETE
+        self.credit_analysis_complete = True
+
+    def _apply_ComplianceCheckRequested(self, event: dict) -> None:
+        self.state = ApplicationState.COMPLIANCE_REVIEW
+
+    def _apply_ComplianceCheckCompleted(self, event: dict) -> None:
+        p = event.get("payload", {})
+        self.state = ApplicationState.PENDING_DECISION
+        if p.get("overall_verdict") == "CLEAR":
+            self.compliance_passed = True
+
+    def _apply_DecisionGenerated(self, event: dict) -> None:
+        p = event.get("payload", {})
+        # Rule 4: Confidence floor check (logic usually in command, but state reflects it)
+        rec = p.get("recommendation")
+        if rec == "REFER":
+            self.state = ApplicationState.APPROVED_PENDING_HUMAN # Mapping REFER to human review
+        else:
+            # Placeholder for mapping APPROVED/DECLINED
+            pass
+
+    def _apply_HumanReviewCompleted(self, event: dict) -> None:
+        p = event.get("payload", {})
+        if p.get("override"):
+            self.human_review_override = True
+
+    def _apply_ApplicationApproved(self, event: dict) -> None:
+        self.state = ApplicationState.FINAL_APPROVED
+
+    def _apply_ApplicationDeclined(self, event: dict) -> None:
+        self.state = ApplicationState.FINAL_DECLINED
 
     def assert_valid_transition(self, target: ApplicationState) -> None:
         allowed = VALID_TRANSITIONS.get(self.state, [])
         if target not in allowed:
-            raise ValueError(f"Invalid transition {self.state} → {target}. Allowed: {allowed}")
+            from ledger.domain.errors import DomainError
+            raise DomainError(f"Invalid transition {self.state} → {target}. Allowed: {allowed}")
+
+    def validate_credit_analysis(self) -> None:
+        """Rule 3: Model version locking."""
+        if self.credit_analysis_complete and not self.human_review_override:
+            from ledger.domain.errors import DomainError
+            raise DomainError("Credit analysis already complete. Supersede via HumanReviewOverride first.")
+
+    def validate_decision_confidence(self, confidence: float) -> str:
+        """Rule 4: Confidence floor enforcement."""
+        if confidence < 0.60:
+            return "REFER"
+        return "MATCH_RECOMMENDATION" # Placeholder for actual recommendation
+
+    def validate_approval_dependency(self) -> None:
+        """Rule 5: Compliance dependency."""
+        if not self.compliance_passed:
+            from ledger.domain.errors import DomainError
+            raise DomainError("Cannot approve application: Compliance check has not passed or is incomplete.")
+
+    def validate_causal_chain(self, contributing_sessions: list[str]) -> None:
+        """Rule 6: Causal chain enforcement."""
+        # This requires the aggregate to know which sessions are valid.
+        pass
+
+    def assert_awaiting_credit_analysis(self) -> None:
+        if self.state != ApplicationState.AWAITING_ANALYSIS:
+            from ledger.domain.errors import DomainError
+            raise DomainError(f"Cannot complete credit analysis: current state is {self.state}")
