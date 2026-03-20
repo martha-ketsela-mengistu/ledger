@@ -11,3 +11,5 @@ __pycache__/
 .agent
 .antigravity
 lib/
+.venv/
+documents/
