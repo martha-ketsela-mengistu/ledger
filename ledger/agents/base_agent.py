@@ -6,11 +6,10 @@ CreditAnalysisAgent is the reference implementation with full LangGraph pattern.
 The other 4 agents are stubs with complete docstrings for implementation.
 """
 from __future__ import annotations
-import asyncio, hashlib, json, time
+import asyncio, hashlib, json, time, os
 from abc import ABC, abstractmethod
 from datetime import datetime
 from uuid import uuid4
-from anthropic import AsyncAnthropic
 from langgraph.graph import StateGraph, END
 
 LANGGRAPH_VERSION = "1.0.0"
@@ -28,13 +27,14 @@ class BaseApexAgent(ABC):
     Each tool/registry call must call self._record_tool_call().
     The write_output node must call self._record_output_written() then self._record_node_execution().
     """
-    def __init__(self, agent_id: str, agent_type: str, store, registry, client: AsyncAnthropic, model="claude-sonnet-4-20250514"):
+    def __init__(self, agent_id: str, agent_type: str, store, registry, client=None, model="gpt-oss:120b"):
         self.agent_id = agent_id; self.agent_type = agent_type
         self.store = store; self.registry = registry; self.client = client; self.model = model
         self.session_id = None; self.application_id = None
         self._session_stream = None; self._t0 = None
         self._seq = 0; self._llm_calls = 0; self._tokens = 0; self._cost = 0.0
         self._graph = None
+        self._ollama_client = None
 
     @abstractmethod
     def build_graph(self): raise NotImplementedError
@@ -115,10 +115,29 @@ class BaseApexAgent(ABC):
                 raise
 
     async def _call_llm(self, system, user, max_tokens=1024):
-        resp = await self.client.messages.create(model=self.model, max_tokens=max_tokens,
-            system=system, messages=[{"role":"user","content":user}])
-        t = resp.content[0].text; i = resp.usage.input_tokens; o = resp.usage.output_tokens
-        return t, i, o, round(i/1e6*3.0 + o/1e6*15.0, 6)
+        # Ollama Cloud auth is done via `Authorization: Bearer <OLLAMA_API_KEY>`.
+        # We keep token/cost accounting best-effort; Ollama pricing may differ.
+        if self._ollama_client is None:
+            from ollama import AsyncClient
+
+            host = os.environ.get("OLLAMA_HOST", "https://ollama.com").rstrip("/")
+            api_key = os.environ.get("OLLAMA_API_KEY")
+            headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+            self._ollama_client = AsyncClient(host=host, headers=headers)
+
+        prompt = f"{system}\n\n{user}"
+        resp = await self._ollama_client.chat(
+            model=self.model,
+            messages=[{"role": "user", "content": prompt}],
+            options={"num_predict": max_tokens},
+            stream=False,
+        )
+
+        text = (resp.get("message") or {}).get("content") or resp.get("content") or ""
+        usage = resp.get("usage") if isinstance(resp.get("usage"), dict) else {}
+        i = resp.get("prompt_eval_count", usage.get("prompt_eval_count", 0)) or 0
+        o = resp.get("eval_count", usage.get("eval_count", 0)) or 0
+        return text, int(i), int(o), 0.0
 
     @staticmethod
     def _sha(d): return hashlib.sha256(json.dumps(str(d),sort_keys=True).encode()).hexdigest()[:16]
