@@ -4,7 +4,8 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from ledger.event_store import EventStore, OptimisticConcurrencyError
+from src.event_store import EventStore
+from src.models.events import OptimisticConcurrencyError
 from tests.conftest import db_url  # reused from conftest
 
 @pytest.fixture
