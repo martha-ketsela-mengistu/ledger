@@ -4,7 +4,13 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from ledger.event_store import EventStore, OptimisticConcurrencyError
+import logging
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger("test_concurrency")
+
+from src.event_store import EventStore
+from src.models.events import OptimisticConcurrencyError
 from tests.conftest import db_url  # reused from conftest
 
 @pytest.fixture

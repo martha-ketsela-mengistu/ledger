@@ -25,6 +25,22 @@ import json
 from pydantic import BaseModel, Field
 
 
+# ─── EXCEPTIONS ───────────────────────────────────────────────────────────────
+
+class DomainError(Exception):
+    """Raised when a business rule or state machine invariant is violated."""
+    def __init__(self, message: str, details: dict | None = None):
+        super().__init__(message)
+        self.message = message
+        self.details = details or {}
+
+class OptimisticConcurrencyError(Exception):
+    """Raised when expected_version doesn't match current stream version."""
+    def __init__(self, stream_id: str, expected: int, actual: int):
+        self.stream_id = stream_id; self.expected = expected; self.actual = actual
+        super().__init__(f"OCC on '{stream_id}': expected v{expected}, actual v{actual}")
+
+
 # ─── ENUMS ───────────────────────────────────────────────────────────────────
 
 class RiskTier(str, Enum):
@@ -177,6 +193,50 @@ class BaseEvent(BaseModel):
             "event_version": self.event_version,
             "payload": self.to_payload(),
         }
+
+
+# ─── STORE-ASSIGNED MODELS ────────────────────────────────────────────────────
+
+class StoredEvent(BaseModel):
+    """
+    The full event envelope as stored in the database.
+    Separates store-assigned metadata from the domain-owned payload.
+    """
+    event_id: UUID
+    stream_id: str
+    stream_position: int
+    global_position: int
+    event_type: str
+    event_version: int
+    payload: dict[str, Any]
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    recorded_at: datetime
+
+    @classmethod
+    def from_row(cls, row: dict | Any) -> "StoredEvent":
+        """Construct from a database row (asyncpg Record or dict)."""
+        d = dict(row)
+        # Ensure payload/metadata are dicts if they come back as strings or other JSONB types
+        for key in ('payload', 'metadata'):
+            if isinstance(d.get(key), str):
+                d[key] = json.loads(d[key])
+        return cls(**d)
+
+class StreamMetadata(BaseModel):
+    """Metadata about an individual consistency boundary (aggregate)."""
+    stream_id: str
+    aggregate_type: str
+    current_version: int
+    created_at: datetime
+    archived_at: datetime | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @classmethod
+    def from_row(cls, row: dict | Any) -> "StreamMetadata":
+        d = dict(row)
+        if isinstance(d.get('metadata'), str):
+            d['metadata'] = json.loads(d['metadata'])
+        return cls(**d)
 
 
 # ─── AGGREGATE 1: LOAN APPLICATION ───────────────────────────────────────────
@@ -407,6 +467,14 @@ class AgentSessionStarted(BaseEvent):
     context_source: str
     context_token_count: int
     started_at: datetime
+
+class AgentContextLoaded(BaseEvent):
+    """Enforces the Gas Town requirement: agent must declare its context before working."""
+    event_type: str = "AgentContextLoaded"
+    session_id: str
+    context_source: str
+    context_hash: str
+    loaded_at: datetime
 
 class AgentInputValidated(BaseEvent):
     event_type: str = "AgentInputValidated"
@@ -681,6 +749,7 @@ EVENT_REGISTRY: dict[str, type[BaseEvent]] = {
     "PackageReadyForAnalysis": PackageReadyForAnalysis,
     # AgentSession
     "AgentSessionStarted": AgentSessionStarted,
+    "AgentContextLoaded": AgentContextLoaded,
     "AgentInputValidated": AgentInputValidated,
     "AgentInputValidationFailed": AgentInputValidationFailed,
     "AgentNodeExecuted": AgentNodeExecuted,

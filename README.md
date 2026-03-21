@@ -1,59 +1,39 @@
-# The Ledger — Weeks 9-10 Starter Code
+# The Ledger — Agentic Event Store & Audit Infrastructure
 
 ## Quick Start
 ```bash
-# 1. Install dependencies
-pip install -r requirements.txt
+# 1. Install dependencies (using uv)
+uv sync
 
 # 2. Start PostgreSQL
 docker run -d -e POSTGRES_PASSWORD=apex -e POSTGRES_DB=apex_ledger -p 5432:5432 postgres:16
 
 # 3. Set environment
 cp .env.example .env
-# Edit .env — add your OLLAMA_API_KEY
 
 # 4. Generate all data (companies + documents + seed events → DB)
 python datagen/generate_all.py --db-url postgresql://postgres:apex@localhost/apex_ledger
 
-# 5. Validate schema (no DB needed)
-python datagen/generate_all.py --skip-db --skip-docs --validate-only
+# 5. Run migrations (Apply schema)
+uv run python scripts/apply_schema.py
 
-# 6. Run Phase 0 tests (must pass before starting Phase 1)
-pytest tests/test_schema_and_generator.py -v
-
-# 7. Begin Phase 1: implement EventStore
-# Edit: ledger/event_store.py
-# Test: pytest tests/test_event_store.py -v
+# 6. Execute test suite
+uv run pytest tests/test_concurrency.py -v
 ```
 
-## What Works Out of the Box
-- Full event schema (45 event types) — `ledger/schema/events.py`
-- Complete data generator (GAAP PDFs, Excel, CSV, 1,200+ seed events)
-- Event simulator (all 5 agent pipelines, deterministic)
-- Schema validator (validates all events against EVENT_REGISTRY)
-- Phase 0 tests: 10/10 passing
+## Structure
+- `src/schema.sql`: PostgreSQL schema (events, event_streams, projection_checkpoints, outbox).
+- `src/event_store.py`: `EventStore` class (appends, stream versions, load).
+- `src/models/events.py`: Pydantic models (BaseEvent, StoredEvent, StreamMetadata) + Exceptions.
+- `src/aggregates/`: Aggregate roots (loan_application, agent_session).
+- `src/commands/`: Handlers following the load → validate → determine → append pattern.
 
-## What You Implement
-| Component | File | Phase |
-|-----------|------|-------|
-| EventStore | `ledger/event_store.py` | 1 |
-| ApplicantRegistryClient | `ledger/registry/client.py` | 1 |
-| Domain aggregates | `ledger/domain/aggregates/` | 2 |
-| DocumentProcessingAgent | `ledger/agents/base_agent.py` | 2 |
-| CreditAnalysisAgent | `ledger/agents/base_agent.py` | 2 (reference given) |
-| FraudDetectionAgent | `ledger/agents/base_agent.py` | 3 |
-| ComplianceAgent | `ledger/agents/base_agent.py` | 3 |
-| DecisionOrchestratorAgent | `ledger/agents/base_agent.py` | 3 |
-| Projections + daemon | `ledger/projections/` | 4 |
-| Upcasters | `ledger/upcasters.py` | 4 |
-| MCP server | `ledger/mcp_server.py` | 5 |
-
-## Gate Tests by Phase
+## Verifying Concurrency
+Run the double-decision test to verify optimistic concurrency:
 ```bash
-pytest tests/test_schema_and_generator.py -v  # Phase 0: all must pass before Phase 1
-pytest tests/test_event_store.py -v           # Phase 1
-pytest tests/test_domain.py -v               # Phase 2
-pytest tests/test_narratives.py -v           # Phase 3: all 5 must pass
-pytest tests/test_projections.py -v          # Phase 4
-pytest tests/test_mcp.py -v                  # Phase 5
+uv run pytest tests/test_concurrency.py
 ```
+This test asserts:
+1. Exactly one of two racing tasks succeeds.
+2. The loser raises `OptimisticConcurrencyError`.
+3. Total stream length is correct (4).

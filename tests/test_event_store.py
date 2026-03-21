@@ -11,9 +11,10 @@ Run: pytest tests/test_event_store.py -v
 """
 import asyncio, pytest, sys
 from pathlib import Path; sys.path.insert(0, str(Path(__file__).parent.parent))
-from ledger.event_store import EventStore, OptimisticConcurrencyError
+from src.event_store import EventStore
+from src.models.events import OptimisticConcurrencyError
 
-DB_URL = "postgresql://postgres:apex@localhost/apex_ledger"
+DB_URL = "postgresql://postgres:apex@localhost:5432/apex_ledger"
 
 @pytest.fixture
 async def store():
@@ -65,7 +66,7 @@ async def test_load_stream_ordered(store):
     await store.append("test-load-001", _event("E",3), expected_version=-1)
     events = await store.load_stream("test-load-001")
     assert len(events) == 3
-    positions = [e["stream_position"] for e in events]
+    positions = [e.stream_position for e in events]
     assert positions == sorted(positions)
 
 @pytest.mark.asyncio
@@ -82,5 +83,5 @@ async def test_load_all_yields_in_global_order(store):
     await store.append("test-global-A", _event("E",2), expected_version=-1)
     await store.append("test-global-B", _event("E",2), expected_version=-1)
     all_events = [e async for e in store.load_all(from_position=0)]
-    positions = [e["global_position"] for e in all_events]
+    positions = [e.global_position for e in all_events]
     assert positions == sorted(positions)
