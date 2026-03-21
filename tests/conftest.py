@@ -11,7 +11,7 @@ random.seed(42); Faker.seed(42)
 
 @pytest.fixture
 def db_url():
-    return os.environ.get("TEST_DB_URL", "postgresql://localhost/apex_ledger_test")
+    return os.environ.get("TEST_DB_URL", "postgresql://postgres:apex@localhost:5432/apex_ledger")
 
 @pytest.fixture
 def sample_companies():
@@ -21,5 +21,5 @@ def sample_companies():
 @pytest.fixture
 def event_store_class():
     """Returns the EventStore class. Swap for real once implemented."""
-    from ledger.event_store import EventStore
+    from src.event_store import EventStore
     return EventStore
