@@ -10,11 +10,14 @@ COMPLETION CHECKLIST (implement in order):
 """
 from __future__ import annotations
 import json
+import logging
 from datetime import datetime, UTC
 from typing import AsyncGenerator, Any
 from uuid import UUID
 import asyncpg
 from src.models.events import StoredEvent, StreamMetadata, OptimisticConcurrencyError
+
+logger = logging.getLogger("ledger.event_store")
 
 
 class EventStore:
@@ -36,6 +39,7 @@ class EventStore:
 
     async def connect(self) -> None:
         self._pool = await asyncpg.create_pool(self.db_url, min_size=2, max_size=10)
+        logger.info(f"Connected to EventStore at {self.db_url}")
 
     async def close(self) -> None:
         if self._pool: await self._pool.close()
@@ -68,6 +72,7 @@ class EventStore:
                 # 2. OCC check
                 current = row["current_version"] if row else -1
                 if current != expected_version:
+                    logger.warning(f"OCC Failure on stream '{stream_id}': expected v{expected_version}, actual v{current}")
                     raise OptimisticConcurrencyError(stream_id, expected_version, current)
 
                 # 3. Create stream if new
@@ -108,6 +113,8 @@ class EventStore:
                 await conn.execute(
                     "UPDATE event_streams SET current_version=$1 WHERE stream_id=$2",
                     start_pos + len(events) - 1, stream_id)
+                
+                logger.info(f"Appended {len(events)} events to stream '{stream_id}' (v{expected_version} -> v{start_pos + len(events) - 1})")
                 return positions
 
     async def load_stream(
