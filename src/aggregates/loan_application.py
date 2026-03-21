@@ -19,6 +19,7 @@ See: Section 4 of challenge document for full rule specifications.
 from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
+from src.models.events import StoredEvent, ApplicationState
 
 class ApplicationState(str, Enum):
     NEW = "NEW"
@@ -72,79 +73,75 @@ class LoanApplicationAggregate:
             agg.apply(event)
         return agg
 
-    def apply(self, event: dict) -> None:
+    def apply(self, event: StoredEvent) -> None:
         """Apply one event to update aggregate state."""
-        et = event.get("event_type")
-        method_name = f"_apply_{et}"
+        method_name = f"_on_{event.event_type}"
         if hasattr(self, method_name):
             getattr(self, method_name)(event)
         
-        # Always increment version based on stream position if available
-        if "stream_position" in event:
-            self.version = event["stream_position"]
-        else:
-            self.version += 1
+        self.version = event.stream_position
 
-    def _apply_ApplicationSubmitted(self, event: dict) -> None:
-        p = event.get("payload", {})
+    def _on_ApplicationSubmitted(self, event: StoredEvent) -> None:
+        p = event.payload
         self.state = ApplicationState.SUBMITTED
         self.applicant_id = p.get("applicant_id")
         self.requested_amount_usd = p.get("requested_amount_usd")
         self.loan_purpose = p.get("loan_purpose")
 
-    def _apply_ExtractionCompleted(self, event: dict) -> None:
+    def _on_ExtractionCompleted(self, event: StoredEvent) -> None:
         # Implicitly transitions to AwaitingAnalysis when processing completes
         # This might be triggered via a domain event or a command
         pass
 
-    def _apply_CreditAnalysisRequested(self, event: dict) -> None:
+    def _on_CreditAnalysisRequested(self, event: StoredEvent) -> None:
         self.state = ApplicationState.AWAITING_ANALYSIS
 
-    def _apply_CreditAnalysisCompleted(self, event: dict) -> None:
+    def _on_CreditAnalysisCompleted(self, event: StoredEvent) -> None:
         # Rule 3: Model version locking (handled in command validation but state reflects it)
         self.state = ApplicationState.ANALYSIS_COMPLETE
         self.credit_analysis_complete = True
 
-    def _apply_ComplianceCheckRequested(self, event: dict) -> None:
+    def _on_ComplianceCheckRequested(self, event: StoredEvent) -> None:
         self.state = ApplicationState.COMPLIANCE_REVIEW
 
-    def _apply_ComplianceCheckCompleted(self, event: dict) -> None:
-        p = event.get("payload", {})
+    def _on_ComplianceCheckCompleted(self, event: StoredEvent) -> None:
+        p = event.payload
         self.state = ApplicationState.PENDING_DECISION
         if p.get("overall_verdict") == "CLEAR":
             self.compliance_passed = True
 
-    def _apply_DecisionGenerated(self, event: dict) -> None:
-        p = event.get("payload", {})
-        # Rule 4: Confidence floor check (logic usually in command, but state reflects it)
+    def _on_DecisionGenerated(self, event: StoredEvent) -> None:
+        p = event.payload
         rec = p.get("recommendation")
         if rec == "REFER":
-            self.state = ApplicationState.APPROVED_PENDING_HUMAN # Mapping REFER to human review
-        else:
-            # Placeholder for mapping APPROVED/DECLINED
-            pass
+            self.state = ApplicationState.APPROVED_PENDING_HUMAN
+        elif rec == "APPROVE":
+            self.state = ApplicationState.FINAL_APPROVED
+        elif rec == "DECLINE":
+            self.state = ApplicationState.FINAL_DECLINED
+        self.decision_generated = True
 
-    def _apply_HumanReviewCompleted(self, event: dict) -> None:
-        p = event.get("payload", {})
+    def _on_HumanReviewCompleted(self, event: StoredEvent) -> None:
+        p = event.payload
         if p.get("override"):
             self.human_review_override = True
 
-    def _apply_ApplicationApproved(self, event: dict) -> None:
+    def _on_ApplicationApproved(self, event: StoredEvent) -> None:
         self.state = ApplicationState.FINAL_APPROVED
 
-    def _apply_ApplicationDeclined(self, event: dict) -> None:
+    def _on_ApplicationDeclined(self, event: StoredEvent) -> None:
         self.state = ApplicationState.FINAL_DECLINED
 
     def assert_valid_transition(self, target: ApplicationState) -> None:
         allowed = VALID_TRANSITIONS.get(self.state, [])
         if target not in allowed:
-            from ledger.domain.errors import DomainError
+            from src.models.events import DomainError
             raise DomainError(f"Invalid transition {self.state} → {target}. Allowed: {allowed}")
 
     def validate_credit_analysis(self) -> None:
         """Rule 3: Model version locking."""
         if self.credit_analysis_complete and not self.human_review_override:
-            from ledger.domain.errors import DomainError
+            from src.models.events import DomainError
             raise DomainError("Credit analysis already complete. Supersede via HumanReviewOverride first.")
 
     def validate_decision_confidence(self, confidence: float) -> str:
@@ -156,7 +153,7 @@ class LoanApplicationAggregate:
     def validate_approval_dependency(self) -> None:
         """Rule 5: Compliance dependency."""
         if not self.compliance_passed:
-            from ledger.domain.errors import DomainError
+            from src.models.events import DomainError
             raise DomainError("Cannot approve application: Compliance check has not passed or is incomplete.")
 
     def validate_causal_chain(self, contributing_sessions: list[str]) -> None:
@@ -166,5 +163,5 @@ class LoanApplicationAggregate:
 
     def assert_awaiting_credit_analysis(self) -> None:
         if self.state != ApplicationState.AWAITING_ANALYSIS:
-            from ledger.domain.errors import DomainError
+            from src.models.events import DomainError
             raise DomainError(f"Cannot complete credit analysis: current state is {self.state}")

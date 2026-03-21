@@ -6,11 +6,11 @@ from datetime import datetime, UTC
 from decimal import Decimal
 from typing import Any
 
-from ledger.event_store import EventStore
-from ledger.domain.aggregates.loan_application import LoanApplicationAggregate
-from ledger.domain.aggregates.agent_session import AgentSessionAggregate
-from ledger.domain.commands import CreditAnalysisCompletedCommand, DecisionGeneratedCommand
-from ledger.schema.events import (
+from src.event_store import EventStore
+from src.aggregates.loan_application import LoanApplicationAggregate
+from src.aggregates.agent_session import AgentSessionAggregate
+from src.commands.commands import CreditAnalysisCompletedCommand, DecisionGeneratedCommand
+from src.models.events import (
     CreditAnalysisCompleted, CreditDecision, 
     DecisionGenerated, deserialize_event
 )
@@ -21,12 +21,12 @@ def hash_inputs(data: dict) -> str:
 async def handle_credit_analysis_completed(
     cmd: CreditAnalysisCompletedCommand,
     store: EventStore,
+    correlation_id: str | None = None,
+    causation_id: str | None = None,
 ) -> None:
     # 1. Reconstruct current aggregate state from event history
     app = await LoanApplicationAggregate.load(store, cmd.application_id)
-    # Note: Using full stream_id for AgentSession
-    agent_stream_id = f"agent-credit_analysis-{cmd.session_id}"
-    agent = await AgentSessionAggregate.load(store, agent_stream_id)
+    agent = await AgentSessionAggregate.load(store, "credit_analysis", cmd.session_id)
 
     # 2. Validate — all business rules checked BEFORE any state change
     app.assert_awaiting_credit_analysis()
@@ -63,16 +63,19 @@ async def handle_credit_analysis_completed(
         stream_id=f"loan-{cmd.application_id}",
         events=new_events,
         expected_version=app.version,
+        correlation_id=correlation_id,
+        causation_id=causation_id,
     )
 
 async def handle_decision_generated(
     cmd: DecisionGeneratedCommand,
     store: EventStore,
+    correlation_id: str | None = None,
+    causation_id: str | None = None,
 ) -> None:
     # 1. Reconstruct current aggregate state from event history
     app = await LoanApplicationAggregate.load(store, cmd.application_id)
-    agent_stream_id = f"agent-decision_orchestrator-{cmd.session_id}"
-    agent = await AgentSessionAggregate.load(store, agent_stream_id)
+    agent = await AgentSessionAggregate.load(store, "decision_orchestrator", cmd.session_id)
 
     # 2. Validate — all business rules checked BEFORE any state change
     agent.assert_context_loaded("generate_decision")
@@ -104,8 +107,6 @@ async def handle_decision_generated(
         stream_id=f"loan-{cmd.application_id}",
         events=new_events,
         expected_version=app.version,
+        correlation_id=correlation_id,
+        causation_id=causation_id,
     )
-    
-    # Also record on the agent session stream to mark completion
-    # (Following Rule 6: causal chain requires session to have a record if it contributed)
-    # This might be a separate event or just state update.
