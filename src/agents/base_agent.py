@@ -1,5 +1,5 @@
 """
-ledger/agents/base_agent.py
+src/agents/base_agent.py
 ===========================
 BASE LANGGRAPH AGENT + all 5 agent class stubs.
 CreditAnalysisAgent is the reference implementation with full LangGraph pattern.
@@ -27,14 +27,14 @@ class BaseApexAgent(ABC):
     Each tool/registry call must call self._record_tool_call().
     The write_output node must call self._record_output_written() then self._record_node_execution().
     """
-    def __init__(self, agent_id: str, agent_type: str, store, registry, client=None, model="gpt-oss:120b"):
+    def __init__(self, agent_id: str, agent_type: str, store, registry, client=None, model="google/gemini-2.5-pro"):
         self.agent_id = agent_id; self.agent_type = agent_type
         self.store = store; self.registry = registry; self.client = client; self.model = model
         self.session_id = None; self.application_id = None
         self._session_stream = None; self._t0 = None
         self._seq = 0; self._llm_calls = 0; self._tokens = 0; self._cost = 0.0
         self._graph = None
-        self._ollama_client = None
+        self._llm_client = None
 
     @abstractmethod
     def build_graph(self): raise NotImplementedError
@@ -115,28 +115,28 @@ class BaseApexAgent(ABC):
                 raise
 
     async def _call_llm(self, system, user, max_tokens=1024):
-        # Ollama Cloud auth is done via `Authorization: Bearer <OLLAMA_API_KEY>`.
-        # We keep token/cost accounting best-effort; Ollama pricing may differ.
-        if self._ollama_client is None:
-            from ollama import AsyncClient
+        if self._llm_client is None:
+            from openai import AsyncOpenAI
+            api_key = os.environ.get("OPENROUTER_API_KEY", "dummy_key")
+            self._llm_client = AsyncOpenAI(
+                base_url="https://openrouter.ai/api/v1",
+                api_key=api_key
+            )
 
-            host = os.environ.get("OLLAMA_HOST", "https://ollama.com").rstrip("/")
-            api_key = os.environ.get("OLLAMA_API_KEY")
-            headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-            self._ollama_client = AsyncClient(host=host, headers=headers)
-
-        prompt = f"{system}\n\n{user}"
-        resp = await self._ollama_client.chat(
+        resp = await self._llm_client.chat.completions.create(
             model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-            options={"num_predict": max_tokens},
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user}
+            ],
+            max_tokens=max_tokens,
             stream=False,
         )
 
-        text = (resp.get("message") or {}).get("content") or resp.get("content") or ""
-        usage = resp.get("usage") if isinstance(resp.get("usage"), dict) else {}
-        i = resp.get("prompt_eval_count", usage.get("prompt_eval_count", 0)) or 0
-        o = resp.get("eval_count", usage.get("eval_count", 0)) or 0
+        text = resp.choices[0].message.content or ""
+        usage = resp.usage
+        i = usage.prompt_tokens if usage else 0
+        o = usage.completion_tokens if usage else 0
         return text, int(i), int(o), 0.0
 
     @staticmethod

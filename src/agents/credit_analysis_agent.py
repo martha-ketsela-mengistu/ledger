@@ -1,5 +1,5 @@
 """
-ledger/agents/credit_analysis_agent.py
+src/agents/credit_analysis_agent.py
 =======================================
 CREDIT ANALYSIS AGENT — complete LangGraph reference implementation.
 
@@ -42,8 +42,8 @@ from uuid import uuid4
 
 from langgraph.graph import StateGraph, END
 
-from ledger.agents.base_agent import BaseApexAgent
-from ledger.schema.events import (
+from src.agents.base_agent import BaseApexAgent
+from src.models.events import (
     CreditRecordOpened, HistoricalProfileConsumed, ExtractedFactsConsumed,
     CreditAnalysisCompleted, CreditAnalysisDeferred,
     FraudScreeningRequested,
