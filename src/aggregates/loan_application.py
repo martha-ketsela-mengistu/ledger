@@ -100,6 +100,10 @@ class LoanApplicationAggregate:
         # Rule 3: Model version locking (handled in command validation but state reflects it)
         self.state = ApplicationState.ANALYSIS_COMPLETE
         self.credit_analysis_complete = True
+        # Track session for Rule 6
+        p = event.payload
+        if "session_id" in p:
+            self.decision_sessions.add(p["session_id"])
 
     def _on_ComplianceCheckRequested(self, event: StoredEvent) -> None:
         self.state = ApplicationState.COMPLIANCE_REVIEW
@@ -109,6 +113,9 @@ class LoanApplicationAggregate:
         self.state = ApplicationState.PENDING_DECISION
         if p.get("overall_verdict") == "CLEAR":
             self.compliance_passed = True
+        # Track session for Rule 6
+        if "session_id" in p:
+            self.decision_sessions.add(p["session_id"])
 
     def _on_DecisionGenerated(self, event: StoredEvent) -> None:
         p = event.payload
@@ -158,8 +165,11 @@ class LoanApplicationAggregate:
 
     def validate_causal_chain(self, contributing_sessions: list[str]) -> None:
         """Rule 6: Causal chain enforcement."""
-        # This requires the aggregate to know which sessions are valid.
-        pass
+        # Ensure every contributing session has actually reported a decision/event for this app
+        for sid in contributing_sessions:
+            if sid not in self.decision_sessions:
+                from src.models.events import DomainError
+                raise DomainError(f"Causal chain violation: Session {sid} did not contribute to this application.")
 
     def assert_awaiting_credit_analysis(self) -> None:
         if self.state != ApplicationState.AWAITING_ANALYSIS:
