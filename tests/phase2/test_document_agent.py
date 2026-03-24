@@ -22,11 +22,15 @@ def test_app_id():
 @pytest.fixture
 def setup_test_docs(test_app_id):
     """Creates dummy PDF files for the agent to process."""
-    base_dir = f"g:/projects/ledger/{test_app_id}"
-    os.makedirs(base_dir, exist_ok=True)
+    # Use a local test_documents folder
+    docs_dir = os.path.abspath("test_documents")
+    os.environ["DOCUMENTS_DIR"] = docs_dir
     
-    is_path = os.path.join(base_dir, "income_statement_2024.pdf")
-    bs_path = os.path.join(base_dir, "balance_sheet_2024.pdf")
+    app_dir = os.path.join(docs_dir, test_app_id)
+    os.makedirs(app_dir, exist_ok=True)
+    
+    is_path = os.path.join(app_dir, "income_statement_2024.pdf")
+    bs_path = os.path.join(app_dir, "balance_sheet_2024.pdf")
     
     with open(is_path, "wb") as f:
         f.write(b"%PDF-1.4 dummy content")
@@ -39,9 +43,11 @@ def setup_test_docs(test_app_id):
     }
     
     # Cleanup
-    # os.remove(is_path)
-    # os.remove(bs_path)
-    # os.rmdir(base_dir)
+    import shutil
+    if os.path.exists(docs_dir):
+        shutil.rmtree(docs_dir)
+    if "DOCUMENTS_DIR" in os.environ:
+        del os.environ["DOCUMENTS_DIR"]
 
 @pytest.mark.asyncio
 async def test_document_agent_flow(mock_store, db_url, test_app_id, setup_test_docs):

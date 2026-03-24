@@ -98,8 +98,21 @@ class BaseApexAgent(ABC):
             "recoverable":etype in ("llm_timeout","RateLimitError"),"failed_at":datetime.now().isoformat()}})
 
     async def _append_session(self, event: dict):
-        """TODO: replace print with actual EventStore.append() call"""
-        print(f"  [{self.agent_type[:8]}:{self.session_id}] {event['event_type']}")
+        """Append agent internal session logs to the event store."""
+        try:
+            # Session streams are append-only, use -1 if first event, or just current version
+            # For simplicity in session logs, we can use stream_version
+            ver = await self.store.stream_version(self._session_stream)
+            await self.store.append(
+                stream_id=self._session_stream,
+                events=[event],
+                expected_version=ver,
+                causation_id=self.session_id
+            )
+        except Exception as e:
+            logger.error(f"Failed to append session log: {e}")
+            # Fallback to print if store fails, but don't crash the agent
+            print(f"  [{self.agent_type[:8]}:{self.session_id}] {event['event_type']} (Store Error: {e})")
 
     async def _append_stream(self, stream_id: str, event_dict: dict, causation_id: str = None):
         """Append to any aggregate stream with OCC retry."""
