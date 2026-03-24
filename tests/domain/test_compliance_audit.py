@@ -9,6 +9,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.aggregates.compliance_record import ComplianceRecordAggregate
 from src.aggregates.audit_ledger import AuditLedgerAggregate
+from src.aggregates.document_package import DocumentPackageAggregate
+from src.aggregates.credit_record import CreditRecordAggregate
+from src.aggregates.fraud_screening import FraudScreeningAggregate
 from src.aggregates.loan_application import LoanApplicationAggregate, ApplicationState
 from src.models.events import ComplianceVerdict, StoredEvent, DomainError
 
@@ -79,3 +82,47 @@ async def test_loan_application_causal_chain_validation():
     # Invalid contribution
     with pytest.raises(DomainError, match="Causal chain violation"):
         agg.validate_causal_chain(["sess-rogue-01"])
+
+@pytest.mark.asyncio
+async def test_document_package_ready_check():
+    from src.models.events import DocumentType
+    agg = DocumentPackageAggregate("app-001")
+    
+    required = [DocumentType.INCOME_STATEMENT, DocumentType.BALANCE_SHEET]
+    assert agg.is_extraction_complete(required) is False
+    
+    agg.apply(_sev("ExtractionCompleted", document_type=DocumentType.INCOME_STATEMENT))
+    assert agg.is_extraction_complete(required) is False
+    
+    agg.apply(_sev("ExtractionCompleted", document_type=DocumentType.BALANCE_SHEET))
+    assert agg.is_extraction_complete(required) is True
+
+@pytest.mark.asyncio
+async def test_fraud_screening_cleared_check():
+    agg = FraudScreeningAggregate("app-001")
+    assert agg.is_cleared is True
+    
+    # High risk score
+    agg.apply(_sev("FraudScreeningCompleted", fraud_score=0.9, risk_level="HIGH"))
+    assert agg.is_cleared is False
+    
+    # Low risk score resets it (if that's the logic)
+    agg.apply(_sev("FraudScreeningCompleted", fraud_score=0.1, risk_level="LOW"))
+    assert agg.is_cleared is True
+
+@pytest.mark.asyncio
+async def test_credit_record_reconstruction():
+    from src.models.events import CreditDecision
+    agg = CreditRecordAggregate("app-001")
+    
+    decision = {
+        "risk_tier": "LOW",
+        "recommended_limit_usd": 50000,
+        "confidence": 0.95,
+        "rationale": "Strong financials"
+    }
+    agg.apply(_sev("CreditAnalysisCompleted", decision=decision, model_version="v1"))
+    
+    assert agg.model_version == "v1"
+    assert agg.decision.risk_tier == "LOW"
+    assert agg.decision.recommended_limit_usd == 50000

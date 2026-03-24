@@ -11,6 +11,9 @@ from src.aggregates.loan_application import LoanApplicationAggregate, Applicatio
 from src.aggregates.agent_session import AgentSessionAggregate
 from src.aggregates.compliance_record import ComplianceRecordAggregate
 from src.aggregates.audit_ledger import AuditLedgerAggregate
+from src.aggregates.document_package import DocumentPackageAggregate
+from src.aggregates.credit_record import CreditRecordAggregate
+from src.aggregates.fraud_screening import FraudScreeningAggregate
 from src.commands.commands import CreditAnalysisCompletedCommand, DecisionGeneratedCommand
 from src.models.events import (
     CreditAnalysisCompleted, CreditDecision, 
@@ -29,11 +32,20 @@ async def handle_credit_analysis_completed(
     # 1. Reconstruct current aggregate state from event history
     app = await LoanApplicationAggregate.load(store, cmd.application_id)
     agent = await AgentSessionAggregate.load(store, "credit_analysis", cmd.session_id)
+    doc_pkg = await DocumentPackageAggregate.load(store, cmd.application_id)
 
     # 2. Validate — all business rules checked BEFORE any state change
     app.assert_awaiting_credit_analysis()
     agent.assert_context_loaded("complete_credit_analysis")
     agent.assert_model_version_current(cmd.model_version)
+    
+    # Rule 2: DocumentFactsExtracted must exist before CreditAnalysisCompleted
+    # (Assuming income_statement and balance_sheet are required)
+    from src.models.events import DocumentType
+    required = [DocumentType.INCOME_STATEMENT, DocumentType.BALANCE_SHEET]
+    if not doc_pkg.is_extraction_complete(required):
+        from src.models.events import DomainError
+        raise DomainError(f"Cannot complete analysis: required extractions {required} are missing or incomplete.")
     
     # Rule 3: Model version locking (already checked in assert_awaiting_credit_analysis partially, 
     # but let's be explicit if needed)
@@ -80,9 +92,15 @@ async def handle_decision_generated(
     agent = await AgentSessionAggregate.load(store, "decision_orchestrator", cmd.session_id)
     compliance = await ComplianceRecordAggregate.load(store, cmd.application_id)
     audit = await AuditLedgerAggregate.load(store, cmd.application_id)
+    fraud = await FraudScreeningAggregate.load(store, cmd.application_id)
 
     # 2. Validate — all business rules checked BEFORE any state change
     agent.assert_context_loaded("generate_decision")
+    
+    # Fraud check
+    if not fraud.is_cleared:
+        from src.models.events import DomainError
+        raise DomainError("Decision blocked: Fraud screening has high risk or high anomaly counts.")
     
     # Rule 6: Causal chain enforcement (validate sessions against application context)
     app.validate_causal_chain(cmd.contributing_sessions)
