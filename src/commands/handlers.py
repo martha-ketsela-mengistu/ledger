@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import logging
 from datetime import datetime, UTC
 from decimal import Decimal
 from typing import Any
@@ -15,13 +16,17 @@ from src.aggregates.document_package import DocumentPackageAggregate
 from src.aggregates.credit_record import CreditRecordAggregate
 from src.aggregates.fraud_screening import FraudScreeningAggregate
 from src.commands.commands import CreditAnalysisCompletedCommand, DecisionGeneratedCommand
+
+logger = logging.getLogger(__name__)
+
+def hash_inputs(data: dict) -> str:
+    """Computes a SHA-256 hash of a dictionary for data integrity tracking."""
+    return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
+
 from src.models.events import (
     CreditAnalysisCompleted, CreditDecision, 
     DecisionGenerated, AuditIntegrityCheckRun, deserialize_event
 )
-
-def hash_inputs(data: dict) -> str:
-    return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
 
 async def handle_credit_analysis_completed(
     cmd: CreditAnalysisCompletedCommand,
@@ -29,6 +34,13 @@ async def handle_credit_analysis_completed(
     correlation_id: str | None = None,
     causation_id: str | None = None,
 ) -> None:
+    """
+    Handles the completion of a credit analysis by an agent.
+    
+    Validates the state of the application and agent session, checks for
+    document extraction completeness, and appends a CreditAnalysisCompleted event.
+    """
+    logger.info(f"Handling CreditAnalysisCompleted for app={cmd.application_id} sess={cmd.session_id}")
     # 1. Reconstruct current aggregate state from event history
     app = await LoanApplicationAggregate.load(store, cmd.application_id)
     agent = await AgentSessionAggregate.load(store, "credit_analysis", cmd.session_id)
@@ -87,6 +99,13 @@ async def handle_decision_generated(
     correlation_id: str | None = None,
     causation_id: str | None = None,
 ) -> None:
+    """
+    Handles the generation of a final (or preliminary) loan decision.
+    
+    Validates fraud screening, compliance status, and causal chains.
+    Enforces confidence floors and updates the audit ledger with a chaining hash.
+    """
+    logger.info(f"Handling DecisionGenerated for app={cmd.application_id} recommendation={cmd.recommendation}")
     # 1. Reconstruct current aggregate state from event history
     app = await LoanApplicationAggregate.load(store, cmd.application_id)
     agent = await AgentSessionAggregate.load(store, "decision_orchestrator", cmd.session_id)

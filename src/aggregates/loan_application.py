@@ -16,10 +16,12 @@ BUSINESS RULES TO ENFORCE:
 
 See: Section 4 of challenge document for full rule specifications.
 """
-from __future__ import annotations
+import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from src.models.events import StoredEvent, ApplicationState
+
+logger = logging.getLogger(__name__)
 
 class ApplicationState(str, Enum):
     NEW = "NEW"
@@ -65,7 +67,17 @@ class LoanApplicationAggregate:
 
     @classmethod
     async def load(cls, store, application_id: str) -> "LoanApplicationAggregate":
-        """Load and replay event stream to rebuild aggregate state."""
+        """
+        Load and replay event stream to rebuild aggregate state.
+        
+        Args:
+            store: The event store instance.
+            application_id: The ID of the application stream to load.
+            
+        Returns:
+            A reconstructed LoanApplicationAggregate instance.
+        """
+        logger.debug(f"Loading LoanApplicationAggregate for {application_id}")
         agg = cls(application_id=application_id)
         stream_id = f"loan-{application_id}"
         events = await store.load_stream(stream_id)
@@ -74,8 +86,13 @@ class LoanApplicationAggregate:
         return agg
 
     def apply(self, event: StoredEvent) -> None:
-        """Apply one event to update aggregate state."""
+        """
+        Apply one event to update aggregate state.
+        
+        This method dynamically calls the appropriate _on_<EventType> handler.
+        """
         method_name = f"_on_{event.event_type}"
+        logger.debug(f"[{self.application_id}] Applying {event.event_type} (v{event.stream_position})")
         if hasattr(self, method_name):
             getattr(self, method_name)(event)
         
@@ -140,9 +157,16 @@ class LoanApplicationAggregate:
         self.state = ApplicationState.FINAL_DECLINED
 
     def assert_valid_transition(self, target: ApplicationState) -> None:
+        """
+        Enforce the application state machine.
+        
+        Raises:
+            DomainError: If the transition is not explicitly allowed.
+        """
         allowed = VALID_TRANSITIONS.get(self.state, [])
         if target not in allowed:
             from src.models.events import DomainError
+            logger.error(f"[{self.application_id}] Invalid transition {self.state} → {target}")
             raise DomainError(f"Invalid transition {self.state} → {target}. Allowed: {allowed}")
 
     def validate_credit_analysis(self) -> None:

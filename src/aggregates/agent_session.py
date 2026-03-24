@@ -1,7 +1,10 @@
 # ledger/domain/aggregates/agent_session.py
 
+import logging
 from dataclasses import dataclass, field
 from src.models.events import DomainError, StoredEvent, AgentType
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class AgentSessionAggregate:
@@ -14,7 +17,10 @@ class AgentSessionAggregate:
 
     @classmethod
     async def load(cls, store, agent_id: str, session_id: str) -> "AgentSessionAggregate":
-        """Load and replay event stream to rebuild aggregate state."""
+        """
+        Load and replay event stream to rebuild aggregate state.
+        """
+        logger.debug(f"Loading AgentSessionAggregate for {agent_id}:{session_id}")
         stream_id = f"agent-{agent_id}-{session_id}"
         agg = cls(session_id=session_id)
         events = await store.load_stream(stream_id)
@@ -23,7 +29,10 @@ class AgentSessionAggregate:
         return agg
 
     def apply(self, event: StoredEvent) -> None:
-        """Apply one event to update aggregate state."""
+        """
+        Apply one event to update aggregate state.
+        """
+        logger.debug(f"[{self.session_id}] Applying {event.event_type}")
         method_name = f"_on_{event.event_type}"
         if hasattr(self, method_name):
             getattr(self, method_name)(event)

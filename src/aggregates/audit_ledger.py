@@ -2,9 +2,12 @@
 
 import hashlib
 import json
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from src.models.events import StoredEvent
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class AuditLedgerAggregate:
@@ -16,7 +19,10 @@ class AuditLedgerAggregate:
 
     @classmethod
     async def load(cls, store, entity_id: str) -> "AuditLedgerAggregate":
-        """Load and replay event stream to rebuild aggregate state."""
+        """
+        Load and replay event stream to rebuild aggregate state.
+        """
+        logger.debug(f"Loading AuditLedgerAggregate for {entity_id}")
         agg = cls(entity_id=entity_id)
         stream_id = f"audit-{entity_id}"
         events = await store.load_stream(stream_id)
@@ -25,7 +31,10 @@ class AuditLedgerAggregate:
         return agg
 
     def apply(self, event: StoredEvent) -> None:
-        """Apply one event to update aggregate state."""
+        """
+        Apply one event to update aggregate state.
+        """
+        logger.debug(f"[{self.entity_id}] Applying {event.event_type}")
         et = event.event_type
         p = event.payload
         

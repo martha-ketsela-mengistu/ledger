@@ -1,7 +1,10 @@
 # src/aggregates/fraud_screening.py
 
+import logging
 from dataclasses import dataclass, field
 from src.models.events import StoredEvent
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class FraudScreeningAggregate:
@@ -14,7 +17,10 @@ class FraudScreeningAggregate:
 
     @classmethod
     async def load(cls, store, application_id: str) -> "FraudScreeningAggregate":
-        """Load and replay event stream to rebuild aggregate state."""
+        """
+        Load and replay event stream to rebuild aggregate state.
+        """
+        logger.debug(f"Loading FraudScreeningAggregate for {application_id}")
         agg = cls(application_id=application_id)
         stream_id = f"fraud-{application_id}"
         events = await store.load_stream(stream_id)
@@ -23,7 +29,10 @@ class FraudScreeningAggregate:
         return agg
 
     def apply(self, event: StoredEvent) -> None:
-        """Apply one event to update aggregate state."""
+        """
+        Apply one event to update aggregate state.
+        """
+        logger.debug(f"[{self.application_id}] Applying {event.event_type}")
         et = event.event_type
         p = event.payload
         

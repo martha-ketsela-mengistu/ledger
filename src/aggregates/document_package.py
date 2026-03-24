@@ -1,7 +1,10 @@
 # src/aggregates/document_package.py
 
+import logging
 from dataclasses import dataclass, field
 from src.models.events import StoredEvent, DocumentType
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class DocumentPackageAggregate:
@@ -13,7 +16,10 @@ class DocumentPackageAggregate:
 
     @classmethod
     async def load(cls, store, application_id: str) -> "DocumentPackageAggregate":
-        """Load and replay event stream to rebuild aggregate state."""
+        """
+        Load and replay event stream to rebuild aggregate state.
+        """
+        logger.debug(f"Loading DocumentPackageAggregate for {application_id}")
         agg = cls(application_id=application_id)
         stream_id = f"docpkg-{application_id}"
         events = await store.load_stream(stream_id)
@@ -22,7 +28,10 @@ class DocumentPackageAggregate:
         return agg
 
     def apply(self, event: StoredEvent) -> None:
-        """Apply one event to update aggregate state."""
+        """
+        Apply one event to update aggregate state.
+        """
+        logger.debug(f"[{self.application_id}] Applying {event.event_type}")
         et = event.event_type
         p = event.payload
         

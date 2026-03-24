@@ -1,10 +1,18 @@
 # src/aggregates/compliance_record.py
 
+import logging
 from dataclasses import dataclass, field
 from src.models.events import ComplianceVerdict, StoredEvent
 
+logger = logging.getLogger(__name__)
+
 @dataclass
 class ComplianceRecordAggregate:
+    """
+    Aggregate representing the compliance status of a loan application.
+    
+    Tracks individual rule passes/fails and the overall verdict.
+    """
     application_id: str
     rules_passed: set[str] = field(default_factory=set)
     rules_failed: set[str] = field(default_factory=set)
@@ -14,7 +22,10 @@ class ComplianceRecordAggregate:
 
     @classmethod
     async def load(cls, store, application_id: str) -> "ComplianceRecordAggregate":
-        """Load and replay event stream to rebuild aggregate state."""
+        """
+        Load and replay event stream to rebuild aggregate state.
+        """
+        logger.debug(f"Loading ComplianceRecordAggregate for {application_id}")
         agg = cls(application_id=application_id)
         stream_id = f"compliance-{application_id}"
         events = await store.load_stream(stream_id)
@@ -23,7 +34,10 @@ class ComplianceRecordAggregate:
         return agg
 
     def apply(self, event: StoredEvent) -> None:
-        """Apply one event to update aggregate state."""
+        """
+        Apply one event to update aggregate state.
+        """
+        logger.debug(f"[{self.application_id}] Applying {event.event_type}")
         et = event.event_type
         p = event.payload
         
