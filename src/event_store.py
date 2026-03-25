@@ -204,6 +204,30 @@ class EventStore:
             if not row: return None
             return StreamMetadata.from_row(row)
 
+    async def save_snapshot(self, stream_id: str, version: int, state: dict):
+        """Saves a point-in-time snapshot of an aggregate's state."""
+        meta = await self.get_stream_metadata(stream_id)
+        if not meta:
+            raise ValueError(f"Stream {stream_id} not found")
+            
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO snapshots(stream_id, stream_position, aggregate_type, snapshot_version, state) "
+                "VALUES($1, $2, $3, $4, $5::jsonb)",
+                stream_id, version, meta.aggregate_type, 1, json.dumps(state)
+            )
+            logger.info(f"Saved snapshot for '{stream_id}' at v{version}")
+
+    async def load_snapshot(self, stream_id: str) -> tuple[int, dict] | None:
+        """Loads the latest snapshot for a stream. Returns (version, state)."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT stream_position, state FROM snapshots "
+                "WHERE stream_id = $1 ORDER BY stream_position DESC LIMIT 1",
+                stream_id)
+            if not row: return None
+            return row["stream_position"], json.loads(row["state"])
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UPCASTER REGISTRY — Phase 4
@@ -251,94 +275,6 @@ class UpcasterRegistry:
             v += 1
             event["event_version"] = v
         return event
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# IN-MEMORY EVENT STORE — for tests only
-# ─────────────────────────────────────────────────────────────────────────────
-
-class InMemoryEventStore:
-    """
-    In-memory event store for unit tests. No database required.
-    Identical interface to EventStore — swap transparently in conftest.py.
-
-    Your Phase 1 tests use this. Once EventStore is implemented and a test
-    database is available, you can run all tests against the real store too.
-    """
-
-    def __init__(self, upcaster_registry=None):
-        self.upcasters = upcaster_registry
-        self._streams: dict[str, list[dict]] = {}   # stream_id → [event_dict, ...]
-        self._global: list[dict] = []               # all events in global order
-
-    async def stream_version(self, stream_id: str) -> int:
-        events = self._streams.get(stream_id, [])
-        return len(events) - 1  # -1 if empty, 0-based index otherwise
-
-    async def append(
-        self,
-        stream_id: str,
-        events: list[dict],
-        expected_version: int,
-        correlation_id: str | None = None,
-        causation_id: str | None = None,
-        metadata: dict | None = None,
-    ) -> list[int]:
-        current = await self.stream_version(stream_id)
-        if current != expected_version:
-            raise OptimisticConcurrencyError(stream_id, expected_version, current)
-
-        self._streams.setdefault(stream_id, [])
-        positions = []
-        start_pos = (0 if current == -1 else current) + 1
-        for i, event in enumerate(events):
-            pos = start_pos + i
-            stored = {
-                "event_id": str(__import__("uuid").uuid4()),
-                "stream_id": stream_id,
-                "stream_position": pos,
-                "global_position": len(self._global),
-                "event_type": event["event_type"],
-                "event_version": event.get("event_version", 1),
-                "payload": dict(event.get("payload", {})),
-                "metadata": {
-                    **(metadata or {}), 
-                    **({"correlation_id": correlation_id} if correlation_id else {}),
-                    **({"causation_id": causation_id} if causation_id else {})
-                },
-                "recorded_at": __import__("datetime").datetime.now(__import__("datetime").UTC),
-            }
-            self._streams[stream_id].append(stored)
-            self._global.append(stored)
-            positions.append(pos)
-        return positions
-
-    async def load_stream(
-        self,
-        stream_id: str,
-        from_position: int = 0,
-        to_position: int | None = None,
-    ) -> list[dict]:
-        events = self._streams.get(stream_id, [])
-        result = [e for e in events if e["stream_position"] >= from_position]
-        if to_position is not None:
-            result = [e for e in result if e["stream_position"] <= to_position]
-        if self.upcaster_registry: # Registry name might vary, checking both local and imported
-            result = [self.upcasters.upcast(dict(e)) for e in result]
-        return [StoredEvent.from_row(e) for e in result]
-
-    async def load_all(
-        self, from_position: int = 0, batch_size: int = 500
-    ):
-        for event in self._global:
-            if event["global_position"] >= from_position:
-                yield StoredEvent.from_row(event)
-
-    async def get_event(self, event_id: str) -> StoredEvent | None:
-        for event in self._global:
-            if event["event_id"] == str(event_id):
-                return StoredEvent.from_row(event)
-        return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

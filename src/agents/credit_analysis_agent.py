@@ -142,11 +142,6 @@ class CreditAnalysisAgent(BaseApexAgent):
         if not pkg.is_ready:
             errors.append("Document package not ready/completed")
 
-        # Verify package is ready
-        # TODO: pkg = await DocumentPackageAggregate.load(self.store, app_id)
-        # if not pkg.is_ready_for_analysis:
-        #     errors.append("Document package not ready")
-
         ms = int((time.time() - t) * 1000)
         if errors:
             await self._record_input_failed([], errors)

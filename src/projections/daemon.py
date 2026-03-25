@@ -32,6 +32,14 @@ class ProjectionDaemon:
 
     async def run_forever(self, poll_interval_ms: int = 100) -> None:
         self._running = True
+        
+        # 1. Initialize all projections before polling
+        if self._db_pool:
+            async with self._db_pool.acquire() as conn:
+                for name, proj in self._projections.items():
+                    logger.info(f"Initializing projection: {name}")
+                    await proj.initialize(conn)
+        
         while self._running:
             try:
                 await self._process_batch()
@@ -45,7 +53,6 @@ class ProjectionDaemon:
         
         # We will dispatch events individually to each projection that hasn't processed it yet
         async for event in self._store.load_all(from_position=min_checkpoint, batch_size=500):
-            print(f"--- DAEMON LOADED EVENT: {event.event_type} at pos {event.global_position} ---")
             # Track max global position for lag metric
             if event.global_position > self._latest_global_pos:
                 self._latest_global_pos = event.global_position

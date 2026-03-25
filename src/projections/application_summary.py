@@ -12,7 +12,8 @@ class ApplicationSummary:
             CREATE TABLE IF NOT EXISTS application_summary (
                 application_id TEXT PRIMARY KEY,
                 applicant_id TEXT,
-                state TEXT,
+                company_id TEXT,
+                status TEXT DEFAULT 'SUBMITTED',
                 requested_amount_usd NUMERIC,
                 approved_amount_usd NUMERIC,
                 risk_tier TEXT,
@@ -23,7 +24,8 @@ class ApplicationSummary:
                 last_event_type TEXT,
                 last_event_at TIMESTAMPTZ,
                 human_reviewer_id TEXT,
-                final_decision_at TIMESTAMPTZ
+                final_decision_at TIMESTAMPTZ,
+                last_updated_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
 
@@ -45,9 +47,9 @@ class ApplicationSummary:
         if event.event_type == "ApplicationSubmitted":
             await conn.execute("""
                 UPDATE application_summary 
-                SET applicant_id = $1, state = 'SUBMITTED', requested_amount_usd = $2
-                WHERE application_id = $3
-            """, p.get("applicant_id"), p.get("requested_amount_usd"), app_id)
+                SET applicant_id = $1, company_id = $2, status = 'SUBMITTED', requested_amount_usd = $3
+                WHERE application_id = $4
+            """, p.get("applicant_id"), p.get("applicant_id"), p.get("requested_amount_usd"), app_id)
             
         elif event.event_type == "ApplicationApproved":
             await conn.execute("""
