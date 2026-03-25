@@ -113,7 +113,7 @@ class LoanApplicationAggregate:
     def _on_FraudScreeningRequested(self, event: StoredEvent) -> None:
         self.state = ApplicationState.FRAUD_SCREENING_REQUESTED
 
-    def _on_FraudScreeningComplete(self, event: StoredEvent) -> None:
+    def _on_FraudScreeningCompleted(self, event: StoredEvent) -> None:
         self.state = ApplicationState.FRAUD_SCREENING_COMPLETE
 
     def _on_ComplianceCheckRequested(self, event: StoredEvent) -> None:

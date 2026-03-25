@@ -3,9 +3,9 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from ledger.domain.aggregates.loan_application import LoanApplicationAggregate, ApplicationState
-from ledger.domain.aggregates.agent_session import AgentSessionAggregate
-from ledger.domain.errors import DomainError
+from src.aggregates.loan_application import LoanApplicationAggregate, ApplicationState
+from src.aggregates.agent_session import AgentSessionAggregate
+from src.models.events import DomainError
 
 def _ev(event_type, **payload):
     return {"event_type": event_type, "payload": payload, "stream_position": 1}

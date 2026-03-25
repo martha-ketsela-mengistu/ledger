@@ -46,13 +46,36 @@ class BaseApexAgent(ABC):
     @abstractmethod
     def build_graph(self): raise NotImplementedError
 
-    async def process_application(self, application_id: str) -> None:
+    async def process_application(self, application_id: str, recover_from_session_id: str = None) -> None:
         if not self._graph: self._graph = self.build_graph()
         self.application_id = application_id
         self.session_id = f"sess-{self.agent_type[:3]}-{uuid4().hex[:8]}"
         self._session_stream = f"agent-{self.agent_type}-{self.session_id}"
         self._t0 = time.time(); self._seq = 0; self._llm_calls = 0; self._tokens = 0; self._cost = 0.0
-        await self._start_session(application_id)
+        
+        self._recovered_nodes = set()
+        if recover_from_session_id:
+            prior_stream = f"agent-{self.agent_type}-{recover_from_session_id}"
+            try:
+                prior_events = await self.store.load_stream(prior_stream)
+                for ev in prior_events:
+                    if ev.event_type == "AgentNodeExecuted":
+                        self._recovered_nodes.add(ev.payload["node_name"])
+            except Exception as e:
+                logger.warning(f"Could not load prior session for recovery: {e}")
+
+        await self._start_session(application_id, recover_from_session_id)
+        
+        if recover_from_session_id:
+            await self._append_session({"event_type": "AgentSessionRecovered", "event_version": 1, "payload": {
+                "session_id": self.session_id,
+                "agent_type": self.agent_type,
+                "application_id": self.application_id,
+                "recovered_from_session_id": recover_from_session_id,
+                "recovery_point": list(self._recovered_nodes)[-1] if self._recovered_nodes else "start",
+                "recovered_at": datetime.now().isoformat()
+            }})
+            
         try:
             result = await self._graph.ainvoke(self._initial_state(application_id))
             await self._complete_session(result)
@@ -63,13 +86,17 @@ class BaseApexAgent(ABC):
         return {"application_id": app_id, "session_id": self.session_id,
                 "agent_id": self.agent_id, "errors": [], "output_events_written": [], "next_agent_triggered": None}
 
-    async def _start_session(self, app_id):
+    async def _start_session(self, app_id, recover_from_session_id=None):
+        ctx_source = f"prior_session_replay:{recover_from_session_id}" if recover_from_session_id else "fresh"
         await self._append_session({"event_type":"AgentSessionStarted","event_version":1,"payload":{
             "session_id":self.session_id,"agent_type":self.agent_type,"agent_id":self.agent_id,
             "application_id":app_id,"model_version":self.model,"langgraph_graph_version":LANGGRAPH_VERSION,
-            "context_source":"fresh","context_token_count":1000,"started_at":datetime.now().isoformat()}})
+            "context_source":ctx_source,"context_token_count":1000,"started_at":datetime.now().isoformat()}})
 
     async def _record_node_execution(self, name, in_keys, out_keys, ms, tok_in=None, tok_out=None, cost=None):
+        if hasattr(self, "_recovered_nodes") and name in self._recovered_nodes:
+            return  # Skip duplicate log for replayed nodes
+            
         self._seq += 1
         if tok_in: self._tokens += tok_in + (tok_out or 0); self._llm_calls += 1
         if cost: self._cost += cost

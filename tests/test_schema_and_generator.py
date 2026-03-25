@@ -13,7 +13,7 @@ from decimal import Decimal
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from ledger.schema.events import EVENT_REGISTRY, BaseEvent, FinancialFacts, CreditDecision
+from src.models.events import EVENT_REGISTRY, BaseEvent, FinancialFacts, CreditDecision
 from datagen.company_generator import generate_companies
 from datagen.event_simulator import EventSimulator
 from datagen.schema_validator import SchemaValidator

@@ -39,7 +39,72 @@ async def test_narr03_agent_crash_recovery():
               second AgentSessionStarted has context_source starting with 'prior_session_replay:',
               no duplicate analysis work.
     """
-    pytest.skip("Implement after FraudDetectionAgent + crash recovery implemented")
+    import asyncio
+    from src.event_store import EventStore
+    from src.registry.client import ApplicantRegistryClient
+    from src.agents.fraud_detection_agent import FraudDetectionAgent
+    import asyncpg
+    from uuid import uuid4
+    DB_URL = "postgresql://postgres:apex@localhost/apex_ledger"
+    
+    store = EventStore(DB_URL)
+    await store.connect()
+    pool = await asyncpg.create_pool(DB_URL)
+    registry = ApplicantRegistryClient(pool)
+    
+    app_id = f"APEX-NARR-{uuid4().hex[:6]}"
+    applicant_id = "COMP-005"
+    
+    # Bootstrap required prior events
+    await store.append(f"loan-{app_id}", [{"event_type": "ApplicationSubmitted", "payload": {"application_id": app_id, "applicant_id": applicant_id}}], -1)
+    await store.append(f"docpkg-{app_id}", [{"event_type": "ExtractionCompleted", "payload": {"facts": {"total_revenue": 5000000}}}], -1)
+
+    agent1 = FraudDetectionAgent("fraud-agent-01", "fraud_detection", store, registry)
+    
+    # 1. Simulate a mid-session crash during LLM analysis
+    original_node_analyze = agent1._node_analyze
+    async def mock_node_analyze(state):
+        raise TimeoutError("Simulated LLM Timeout Crash")
+    agent1._node_analyze = mock_node_analyze
+    
+    with pytest.raises(TimeoutError):
+        await agent1.process_application(app_id)
+        
+    session_id_1 = agent1.session_id
+    
+    # 2. Recover using a new agent instance
+    agent2 = FraudDetectionAgent("fraud-agent-02", "fraud_detection", store, registry)
+    # Mock LLM to succeed this time to save time
+    async def mock_call_llm_success(*args, **kwargs):
+        return "{}", 100, 100, 0.01
+    agent2._call_llm = mock_call_llm_success
+    
+    await agent2.process_application(app_id, recover_from_session_id=session_id_1)
+    session_id_2 = agent2.session_id
+    
+    # 3. Assertions
+    # A) Only ONE FraudScreeningCompleted
+    fraud_events = await store.load_stream(f"fraud-{app_id}")
+    completed_events = [e for e in fraud_events if e.event_type == "FraudScreeningCompleted"]
+    assert len(completed_events) == 1, f"Expected 1 FraudScreeningCompleted, got {len(completed_events)}"
+    
+    # B) Second session has prior_session_replay
+    sess2_events = await store.load_stream(f"agent-fraud_detection-{session_id_2}")
+    start_event = next(e for e in sess2_events if e.event_type == "AgentSessionStarted")
+    assert start_event.payload["context_source"].startswith("prior_session_replay:")
+    
+    # C) AgentSessionRecovered is present
+    recovered_event = next((e for e in sess2_events if e.event_type == "AgentSessionRecovered"), None)
+    assert recovered_event is not None
+    assert recovered_event.payload["recovered_from_session_id"] == session_id_1
+    
+    # D) Zero duplicate AgentNodeExecuted for load_facts
+    sess1_events = await store.load_stream(f"agent-fraud_detection-{session_id_1}")
+    all_load_events = [e for e in (sess1_events + sess2_events) 
+                      if e.event_type == "AgentNodeExecuted" and e.payload["node_name"] == "load_document_facts"]
+    assert len(all_load_events) == 1, "Duplicate load_document_facts execution detected!"
+    
+    await store.close()
 
 @pytest.mark.asyncio
 async def test_narr04_compliance_hard_block():
