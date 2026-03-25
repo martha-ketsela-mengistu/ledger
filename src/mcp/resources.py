@@ -11,9 +11,11 @@ import json
 import logging
 from datetime import datetime
 
-from src.mcp.server import mcp, get_store, get_pool
+from src.mcp.app import mcp
+from src.mcp.server import get_store, get_pool
 
 logger = logging.getLogger(__name__)
+logger.info("Registering MCP resources...")
 
 
 # ─── RESOURCE 1: ledger://applications/{id} ──────────────────────────────────

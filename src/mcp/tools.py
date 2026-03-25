@@ -12,9 +12,11 @@ import logging
 from datetime import datetime, UTC
 from uuid import uuid4
 
-from src.mcp.server import mcp, get_store, get_pool
+from src.mcp.app import mcp
+from src.mcp.server import get_store, get_pool
 
 logger = logging.getLogger(__name__)
+logger.info("Registering MCP tools...")
 
 
 def _error(error_type: str, message: str, **details) -> dict:
