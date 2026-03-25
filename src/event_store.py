@@ -142,7 +142,10 @@ class EventStore:
                         e_dict[key] = json.loads(e_dict[key])
                 
                 if self.upcasters:
-                    e_dict = self.upcasters.upcast(e_dict)
+                    if hasattr(self.upcasters, '__func__') or __import__('asyncio').iscoroutinefunction(getattr(self.upcasters, 'upcast', None)):
+                        e_dict = await self.upcasters.upcast(e_dict)
+                    else:
+                        e_dict = self.upcasters.upcast(e_dict)
                 
                 events.append(StoredEvent.from_row(e_dict))
             return events
@@ -168,7 +171,10 @@ class EventStore:
                             e_dict[key] = json.loads(e_dict[key])
                     
                     if self.upcasters:
-                        e_dict = self.upcasters.upcast(e_dict)
+                        if hasattr(self.upcasters, '__func__') or __import__('asyncio').iscoroutinefunction(getattr(self.upcasters, 'upcast', None)):
+                            e_dict = await self.upcasters.upcast(e_dict)
+                        else:
+                            e_dict = self.upcasters.upcast(e_dict)
                     
                     yield StoredEvent.from_row(e_dict)
                 pos = rows[-1]["global_position"]
