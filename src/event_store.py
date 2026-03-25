@@ -274,6 +274,7 @@ class InMemoryEventStore:
         stream_id: str,
         events: list[dict],
         expected_version: int,
+        correlation_id: str | None = None,
         causation_id: str | None = None,
         metadata: dict | None = None,
     ) -> list[int]:
@@ -371,6 +372,7 @@ class InMemoryEventStore:
         stream_id: str,
         events: list[dict],
         expected_version: int,
+        correlation_id: str | None = None,
         causation_id: str | None = None,
         metadata: dict | None = None,
     ) -> list[int]:
