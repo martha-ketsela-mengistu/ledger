@@ -18,43 +18,32 @@ See: Section 4 of challenge document for full rule specifications.
 """
 import logging
 from dataclasses import dataclass, field
-from enum import Enum
 from src.models.events import StoredEvent, ApplicationState
 
 logger = logging.getLogger(__name__)
 
-class ApplicationState(str, Enum):
-    NEW = "NEW"
-    SUBMITTED = "SUBMITTED"
-    AWAITING_ANALYSIS = "AWAITING_ANALYSIS"
-    ANALYSIS_COMPLETE = "ANALYSIS_COMPLETE"
-    COMPLIANCE_REVIEW = "COMPLIANCE_REVIEW"
-    PENDING_DECISION = "PENDING_DECISION"
-    APPROVED_PENDING_HUMAN = "APPROVED_PENDING_HUMAN"
-    DECLINED_PENDING_HUMAN = "DECLINED_PENDING_HUMAN"
-    FINAL_APPROVED = "FINAL_APPROVED"
-    FINAL_DECLINED = "FINAL_DECLINED"
+# ─── CONSTANTS ────────────────────────────────────────────────────────────────
 
 VALID_TRANSITIONS = {
-    ApplicationState.NEW: [ApplicationState.SUBMITTED],
-    ApplicationState.SUBMITTED: [ApplicationState.AWAITING_ANALYSIS],
-    ApplicationState.AWAITING_ANALYSIS: [ApplicationState.ANALYSIS_COMPLETE],
-    ApplicationState.ANALYSIS_COMPLETE: [ApplicationState.COMPLIANCE_REVIEW],
-    ApplicationState.COMPLIANCE_REVIEW: [ApplicationState.PENDING_DECISION, ApplicationState.FINAL_DECLINED], # DeclinedCompliance case
-    ApplicationState.PENDING_DECISION: [
-        ApplicationState.APPROVED_PENDING_HUMAN, 
-        ApplicationState.DECLINED_PENDING_HUMAN,
-        ApplicationState.FINAL_APPROVED, 
-        ApplicationState.FINAL_DECLINED
-    ],
-    ApplicationState.APPROVED_PENDING_HUMAN: [ApplicationState.FINAL_APPROVED, ApplicationState.FINAL_DECLINED],
-    ApplicationState.DECLINED_PENDING_HUMAN: [ApplicationState.FINAL_APPROVED, ApplicationState.FINAL_DECLINED],
+    None: [ApplicationState.SUBMITTED],
+    ApplicationState.SUBMITTED: [ApplicationState.DOCUMENTS_PENDING, ApplicationState.DOCUMENTS_UPLOADED, ApplicationState.DOCUMENTS_PROCESSED],
+    ApplicationState.DOCUMENTS_PENDING: [ApplicationState.DOCUMENTS_UPLOADED],
+    ApplicationState.DOCUMENTS_UPLOADED: [ApplicationState.DOCUMENTS_PROCESSED],
+    ApplicationState.DOCUMENTS_PROCESSED: [ApplicationState.CREDIT_ANALYSIS_REQUESTED],
+    ApplicationState.CREDIT_ANALYSIS_REQUESTED: [ApplicationState.CREDIT_ANALYSIS_COMPLETE],
+    ApplicationState.CREDIT_ANALYSIS_COMPLETE: [ApplicationState.FRAUD_SCREENING_REQUESTED],
+    ApplicationState.FRAUD_SCREENING_REQUESTED: [ApplicationState.FRAUD_SCREENING_COMPLETE],
+    ApplicationState.FRAUD_SCREENING_COMPLETE: [ApplicationState.COMPLIANCE_CHECK_REQUESTED],
+    ApplicationState.COMPLIANCE_CHECK_REQUESTED: [ApplicationState.COMPLIANCE_CHECK_COMPLETE],
+    ApplicationState.COMPLIANCE_CHECK_COMPLETE: [ApplicationState.PENDING_DECISION, ApplicationState.PENDING_HUMAN_REVIEW],
+    ApplicationState.PENDING_DECISION: [ApplicationState.APPROVED, ApplicationState.DECLINED, ApplicationState.REFERRED],
+    ApplicationState.PENDING_HUMAN_REVIEW: [ApplicationState.APPROVED, ApplicationState.DECLINED, ApplicationState.REFERRED],
 }
 
 @dataclass
 class LoanApplicationAggregate:
     application_id: str
-    state: ApplicationState = ApplicationState.NEW
+    state: ApplicationState | None = None
     applicant_id: str | None = None
     requested_amount_usd: float | None = None
     loan_purpose: str | None = None
@@ -91,10 +80,12 @@ class LoanApplicationAggregate:
         
         This method dynamically calls the appropriate _on_<EventType> handler.
         """
+        logger.info(f"[{self.application_id}] apply() called for event_type='{event.event_type}' v{event.stream_position}")
         method_name = f"_on_{event.event_type}"
-        logger.debug(f"[{self.application_id}] Applying {event.event_type} (v{event.stream_position})")
         if hasattr(self, method_name):
             getattr(self, method_name)(event)
+        else:
+            logger.warning(f"[{self.application_id}] No handler for {event.event_type}")
         
         self.version = event.stream_position
 
@@ -102,35 +93,37 @@ class LoanApplicationAggregate:
         p = event.payload
         self.state = ApplicationState.SUBMITTED
         self.applicant_id = p.get("applicant_id")
+        logger.info(f"[{self.application_id}] ApplicationSubmitted applied: applicant_id={self.applicant_id}")
         self.requested_amount_usd = p.get("requested_amount_usd")
         self.loan_purpose = p.get("loan_purpose")
 
     def _on_ExtractionCompleted(self, event: StoredEvent) -> None:
-        # Implicitly transitions to AwaitingAnalysis when processing completes
-        # This might be triggered via a domain event or a command
-        pass
+        self.state = ApplicationState.DOCUMENTS_PROCESSED
 
     def _on_CreditAnalysisRequested(self, event: StoredEvent) -> None:
-        self.state = ApplicationState.AWAITING_ANALYSIS
+        self.state = ApplicationState.CREDIT_ANALYSIS_REQUESTED
 
     def _on_CreditAnalysisCompleted(self, event: StoredEvent) -> None:
-        # Rule 3: Model version locking (handled in command validation but state reflects it)
-        self.state = ApplicationState.ANALYSIS_COMPLETE
+        self.state = ApplicationState.CREDIT_ANALYSIS_COMPLETE
         self.credit_analysis_complete = True
-        # Track session for Rule 6
         p = event.payload
         if "session_id" in p:
             self.decision_sessions.add(p["session_id"])
 
+    def _on_FraudScreeningRequested(self, event: StoredEvent) -> None:
+        self.state = ApplicationState.FRAUD_SCREENING_REQUESTED
+
+    def _on_FraudScreeningComplete(self, event: StoredEvent) -> None:
+        self.state = ApplicationState.FRAUD_SCREENING_COMPLETE
+
     def _on_ComplianceCheckRequested(self, event: StoredEvent) -> None:
-        self.state = ApplicationState.COMPLIANCE_REVIEW
+        self.state = ApplicationState.COMPLIANCE_CHECK_REQUESTED
 
     def _on_ComplianceCheckCompleted(self, event: StoredEvent) -> None:
         p = event.payload
-        self.state = ApplicationState.PENDING_DECISION
+        self.state = ApplicationState.COMPLIANCE_CHECK_COMPLETE
         if p.get("overall_verdict") == "CLEAR":
             self.compliance_passed = True
-        # Track session for Rule 6
         if "session_id" in p:
             self.decision_sessions.add(p["session_id"])
 
@@ -138,11 +131,11 @@ class LoanApplicationAggregate:
         p = event.payload
         rec = p.get("recommendation")
         if rec == "REFER":
-            self.state = ApplicationState.APPROVED_PENDING_HUMAN
+            self.state = ApplicationState.PENDING_HUMAN_REVIEW
         elif rec == "APPROVE":
-            self.state = ApplicationState.FINAL_APPROVED
+            self.state = ApplicationState.APPROVED
         elif rec == "DECLINE":
-            self.state = ApplicationState.FINAL_DECLINED
+            self.state = ApplicationState.DECLINED
         self.decision_generated = True
 
     def _on_HumanReviewCompleted(self, event: StoredEvent) -> None:
@@ -196,6 +189,6 @@ class LoanApplicationAggregate:
                 raise DomainError(f"Causal chain violation: Session {sid} did not contribute to this application.")
 
     def assert_awaiting_credit_analysis(self) -> None:
-        if self.state != ApplicationState.AWAITING_ANALYSIS:
+        if self.state not in (ApplicationState.CREDIT_ANALYSIS_REQUESTED, ApplicationState.DOCUMENTS_PROCESSED):
             from src.models.events import DomainError
             raise DomainError(f"Cannot complete credit analysis: current state is {self.state}")
