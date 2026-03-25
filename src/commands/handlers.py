@@ -2,21 +2,31 @@
 
 import hashlib
 import json
+import logging
 from datetime import datetime, UTC
 from decimal import Decimal
 from typing import Any
 
 from src.event_store import EventStore
-from src.aggregates.loan_application import LoanApplicationAggregate
+from src.aggregates.loan_application import LoanApplicationAggregate, ApplicationState
 from src.aggregates.agent_session import AgentSessionAggregate
+from src.aggregates.compliance_record import ComplianceRecordAggregate
+from src.aggregates.audit_ledger import AuditLedgerAggregate
+from src.aggregates.document_package import DocumentPackageAggregate
+from src.aggregates.credit_record import CreditRecordAggregate
+from src.aggregates.fraud_screening import FraudScreeningAggregate
 from src.commands.commands import CreditAnalysisCompletedCommand, DecisionGeneratedCommand
-from src.models.events import (
-    CreditAnalysisCompleted, CreditDecision, 
-    DecisionGenerated, deserialize_event
-)
+
+logger = logging.getLogger(__name__)
 
 def hash_inputs(data: dict) -> str:
+    """Computes a SHA-256 hash of a dictionary for data integrity tracking."""
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
+
+from src.models.events import (
+    CreditAnalysisCompleted, CreditDecision, 
+    DecisionGenerated, AuditIntegrityCheckRun, deserialize_event
+)
 
 async def handle_credit_analysis_completed(
     cmd: CreditAnalysisCompletedCommand,
@@ -24,14 +34,30 @@ async def handle_credit_analysis_completed(
     correlation_id: str | None = None,
     causation_id: str | None = None,
 ) -> None:
+    """
+    Handles the completion of a credit analysis by an agent.
+    
+    Validates the state of the application and agent session, checks for
+    document extraction completeness, and appends a CreditAnalysisCompleted event.
+    """
+    logger.info(f"Handling CreditAnalysisCompleted for app={cmd.application_id} sess={cmd.session_id}")
     # 1. Reconstruct current aggregate state from event history
     app = await LoanApplicationAggregate.load(store, cmd.application_id)
     agent = await AgentSessionAggregate.load(store, "credit_analysis", cmd.session_id)
+    doc_pkg = await DocumentPackageAggregate.load(store, cmd.application_id)
 
     # 2. Validate — all business rules checked BEFORE any state change
     app.assert_awaiting_credit_analysis()
     agent.assert_context_loaded("complete_credit_analysis")
     agent.assert_model_version_current(cmd.model_version)
+    
+    # Rule 2: DocumentFactsExtracted must exist before CreditAnalysisCompleted
+    # (Assuming income_statement and balance_sheet are required)
+    from src.models.events import DocumentType
+    required = [DocumentType.INCOME_STATEMENT, DocumentType.BALANCE_SHEET]
+    if not doc_pkg.is_extraction_complete(required):
+        from src.models.events import DomainError
+        raise DomainError(f"Cannot complete analysis: required extractions {required} are missing or incomplete.")
     
     # Rule 3: Model version locking (already checked in assert_awaiting_credit_analysis partially, 
     # but let's be explicit if needed)
@@ -73,15 +99,35 @@ async def handle_decision_generated(
     correlation_id: str | None = None,
     causation_id: str | None = None,
 ) -> None:
+    """
+    Handles the generation of a final (or preliminary) loan decision.
+    
+    Validates fraud screening, compliance status, and causal chains.
+    Enforces confidence floors and updates the audit ledger with a chaining hash.
+    """
+    logger.info(f"Handling DecisionGenerated for app={cmd.application_id} recommendation={cmd.recommendation}")
     # 1. Reconstruct current aggregate state from event history
     app = await LoanApplicationAggregate.load(store, cmd.application_id)
     agent = await AgentSessionAggregate.load(store, "decision_orchestrator", cmd.session_id)
+    compliance = await ComplianceRecordAggregate.load(store, cmd.application_id)
+    audit = await AuditLedgerAggregate.load(store, cmd.application_id)
+    fraud = await FraudScreeningAggregate.load(store, cmd.application_id)
 
     # 2. Validate — all business rules checked BEFORE any state change
     agent.assert_context_loaded("generate_decision")
     
+    # Fraud check
+    if not fraud.is_cleared:
+        from src.models.events import DomainError
+        raise DomainError("Decision blocked: Fraud screening has high risk or high anomaly counts.")
+    
     # Rule 6: Causal chain enforcement (validate sessions against application context)
     app.validate_causal_chain(cmd.contributing_sessions)
+    
+    # Rule 5: Compliance dependency
+    if not compliance.is_fully_cleared():
+        from src.models.events import DomainError
+        raise DomainError("Decision blocked: Compliance record is not fully cleared or has hard blocks.")
     
     # Rule 4: Confidence floor (Enforced here as per regulatory requirement)
     recommendation = app.validate_decision_confidence(cmd.confidence_score)
@@ -89,17 +135,38 @@ async def handle_decision_generated(
         recommendation = cmd.recommendation
     
     # 3. Determine new events — pure logic, no I/O
+    generated_at = datetime.now(UTC)
+    
+    # Decision event
+    decision_event = DecisionGenerated(
+        application_id=cmd.application_id,
+        orchestrator_session_id=cmd.session_id,
+        recommendation=recommendation,
+        confidence=cmd.confidence_score,
+        approved_amount_usd=cmd.approved_amount_usd,
+        executive_summary=cmd.executive_summary,
+        contributing_sessions=cmd.contributing_sessions,
+        generated_at=generated_at
+    )
+    
+    # Audit integrity check (SHA-256 Chaining)
+    # We include all contributing session IDs and the decision event itself in the hash
+    integrity_hash = audit.compute_next_hash(cmd.contributing_sessions + [str(decision_event.event_id)])
+    
+    audit_event = AuditIntegrityCheckRun(
+        entity_type="loan",
+        entity_id=cmd.application_id,
+        check_timestamp=generated_at,
+        events_verified_count=len(cmd.contributing_sessions) + 1,
+        integrity_hash=integrity_hash,
+        previous_hash=audit.last_hash,
+        chain_valid=True,
+        tamper_detected=False
+    )
+    
     new_events = [
-        DecisionGenerated(
-            application_id=cmd.application_id,
-            orchestrator_session_id=cmd.session_id,
-            recommendation=recommendation,
-            confidence=cmd.confidence_score,
-            approved_amount_usd=cmd.approved_amount_usd,
-            executive_summary=cmd.executive_summary,
-            contributing_sessions=cmd.contributing_sessions,
-            generated_at=datetime.now(UTC)
-        ).to_store_dict()
+        decision_event.to_store_dict(),
+        audit_event.to_store_dict()
     ]
 
     # 4. Append atomically — optimistic concurrency enforced by store

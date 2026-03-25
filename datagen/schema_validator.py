@@ -1,7 +1,7 @@
 """datagen/schema_validator.py — validates all generated events against EVENT_REGISTRY"""
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from ledger.schema.events import EVENT_REGISTRY
+from src.models.events import EVENT_REGISTRY
 from collections import Counter
 
 class SchemaValidator:
