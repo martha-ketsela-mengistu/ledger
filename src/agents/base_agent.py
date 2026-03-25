@@ -162,7 +162,6 @@ class BaseApexAgent(ABC):
             )
         except Exception as e:
             logger.error(f"Failed to append session log to store: {e}")
-            print(f"  [{self.agent_type[:8]}:{self.session_id}] {event['event_type']} (Store Error: {e})")
 
         # 2. File Logging (Human readable)
         timestamp = datetime.now().isoformat()

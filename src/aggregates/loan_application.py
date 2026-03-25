@@ -100,6 +100,22 @@ class LoanApplicationAggregate:
     def _on_ExtractionCompleted(self, event: StoredEvent) -> None:
         self.state = ApplicationState.DOCUMENTS_PROCESSED
 
+    def _on_DocumentUploadRequested(self, event: StoredEvent) -> None:
+        """Intent marker - no state change in aggregate."""
+        pass
+
+    def _on_DocumentUploaded(self, event: StoredEvent) -> None:
+        """External state change - no state change in aggregate."""
+        pass
+
+    def _on_DecisionRequested(self, event: StoredEvent) -> None:
+        """Trigger marker - no state change in aggregate."""
+        pass
+
+    def _on_HumanReviewRequested(self, event: StoredEvent) -> None:
+        """Intent marker - no state change in aggregate."""
+        pass
+
     def _on_CreditAnalysisRequested(self, event: StoredEvent) -> None:
         self.state = ApplicationState.CREDIT_ANALYSIS_REQUESTED
 
