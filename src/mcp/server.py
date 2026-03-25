@@ -12,7 +12,7 @@ Usage:
 from __future__ import annotations
 import asyncio
 import logging
-from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP
 
 logger = logging.getLogger(__name__)
 
@@ -34,13 +34,39 @@ _pool = None
 
 
 async def get_store():
-    """Lazy-initialize the EventStore singleton."""
+    """Lazy-initialize the EventStore singleton and ProjectionDaemon."""
     global _store
     if _store is None:
         from src.event_store import EventStore
         from src.upcasting.upcasters import upcaster_registry
         _store = EventStore(DB_URL, upcaster_registry=upcaster_registry)
         await _store.connect()
+        
+        # Start ProjectionDaemon
+        from src.projections.daemon import ProjectionDaemon
+        from src.projections.projections import (
+            ApplicationSummaryProjection,
+            DocumentPackageProjection,
+            ComplianceAuditProjection
+        )
+        # Correct instantiation based on daemon.py: (store, projections_list, db_pool)
+        projections = [
+            ApplicationSummaryProjection(),
+            DocumentPackageProjection(),
+            ComplianceAuditProjection()
+        ]
+        pool = await get_pool()
+        daemon = ProjectionDaemon(_store, projections, db_pool=pool)
+        
+        asyncio.create_task(daemon.run_forever())
+        logger.info("✅ ProjectionDaemon started in background via get_store()")
+
+        # Start OutboxRelay
+        from src.outbox_relay import OutboxRelay
+        relay = OutboxRelay(DB_URL)
+        await relay.start()
+        logger.info("✅ OutboxRelay started in background via get_store()")
+        
     return _store
 
 
