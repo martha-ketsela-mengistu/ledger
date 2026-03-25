@@ -10,7 +10,7 @@ fake = Faker()
 # Import all event classes from canonical schema
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from ledger.schema.events import *
+from src.models.events import *
 
 LG_VERSION = "1.0.0-sim"
 MODEL = "claude-sonnet-4-20250514"
