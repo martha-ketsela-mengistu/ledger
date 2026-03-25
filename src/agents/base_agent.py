@@ -6,11 +6,14 @@ CreditAnalysisAgent is the reference implementation with full LangGraph pattern.
 The other 4 agents are stubs with complete docstrings for implementation.
 """
 from __future__ import annotations
-import asyncio, hashlib, json, time, os
+import asyncio, hashlib, json, time, os, logging
 from abc import ABC, abstractmethod
 from datetime import datetime
 from uuid import uuid4
 from langgraph.graph import StateGraph, END
+
+logger = logging.getLogger(__name__)
+
 
 LANGGRAPH_VERSION = "1.0.0"
 MAX_OCC_RETRIES = 5
@@ -27,7 +30,7 @@ class BaseApexAgent(ABC):
     Each tool/registry call must call self._record_tool_call().
     The write_output node must call self._record_output_written() then self._record_node_execution().
     """
-    def __init__(self, agent_id: str, agent_type: str, store, registry, client=None, model="google/gemini-2.5-pro"):
+    def __init__(self, agent_id: str, agent_type: str, store, registry, client=None, model="google/gemini-2.5-pro", log_dir="logs"):
         self.agent_id = agent_id; self.agent_type = agent_type
         self.store = store; self.registry = registry; self.client = client; self.model = model
         self.session_id = None; self.application_id = None
@@ -35,6 +38,10 @@ class BaseApexAgent(ABC):
         self._seq = 0; self._llm_calls = 0; self._tokens = 0; self._cost = 0.0
         self._graph = None
         self._llm_client = None
+        self.log_dir = log_dir
+        os.makedirs(self.log_dir, exist_ok=True)
+        self.log_file = os.path.join(self.log_dir, f"{self.agent_type}.log")
+        self.jsonl_file = os.path.join(self.log_dir, f"{self.agent_type}_events.jsonl")
 
     @abstractmethod
     def build_graph(self): raise NotImplementedError
@@ -83,6 +90,24 @@ class BaseApexAgent(ABC):
             "session_id":self.session_id,"agent_type":self.agent_type,"application_id":self.application_id,
             "events_written":events_written,"output_summary":summary,"written_at":datetime.now().isoformat()}})
 
+    async def _record_input_validated(self, inputs_validated: list, ms: int):
+        from src.models.events import AgentType
+        await self._append_session({"event_type":"AgentInputValidated","event_version":1,"payload":{
+            "session_id":self.session_id,"agent_type":self.agent_type,
+            "application_id":self.application_id,
+            "inputs_validated":inputs_validated,
+            "validation_duration_ms":ms,
+            "validated_at":datetime.now().isoformat()}})
+
+    async def _record_input_failed(self, missing_inputs: list, errors: list):
+        from src.models.events import AgentType
+        await self._append_session({"event_type":"AgentInputValidationFailed","event_version":1,"payload":{
+            "session_id":self.session_id,"agent_type":self.agent_type,
+            "application_id":self.application_id,
+            "missing_inputs":missing_inputs,
+            "validation_errors":errors,
+            "failed_at":datetime.now().isoformat()}})
+
     async def _complete_session(self, result):
         ms = int((time.time()-self._t0)*1000)
         await self._append_session({"event_type":"AgentSessionCompleted","event_version":1,"payload":{
@@ -98,10 +123,9 @@ class BaseApexAgent(ABC):
             "recoverable":etype in ("llm_timeout","RateLimitError"),"failed_at":datetime.now().isoformat()}})
 
     async def _append_session(self, event: dict):
-        """Append agent internal session logs to the event store."""
+        """Append agent internal session logs to the event store, log file, and JSONL file."""
+        # 1. Standard Event Store write
         try:
-            # Session streams are append-only, use -1 if first event, or just current version
-            # For simplicity in session logs, we can use stream_version
             ver = await self.store.stream_version(self._session_stream)
             await self.store.append(
                 stream_id=self._session_stream,
@@ -110,9 +134,18 @@ class BaseApexAgent(ABC):
                 causation_id=self.session_id
             )
         except Exception as e:
-            logger.error(f"Failed to append session log: {e}")
-            # Fallback to print if store fails, but don't crash the agent
+            logger.error(f"Failed to append session log to store: {e}")
             print(f"  [{self.agent_type[:8]}:{self.session_id}] {event['event_type']} (Store Error: {e})")
+
+        # 2. File Logging (Human readable)
+        timestamp = datetime.now().isoformat()
+        log_entry = f"[{timestamp}] [{self.session_id}] {event['event_type']}: {json.dumps(event['payload'], default=str)}\n"
+        with open(self.log_file, "a") as f:
+            f.write(log_entry)
+
+        # 3. JSONL Logging (Machine readable)
+        with open(self.jsonl_file, "a") as f:
+            f.write(json.dumps({"timestamp": timestamp, "session_id": self.session_id, **event}, default=str) + "\n")
 
     async def _append_stream(self, stream_id: str, event_dict: dict, causation_id: str = None):
         """Append to any aggregate stream with OCC retry."""
@@ -126,6 +159,25 @@ class BaseApexAgent(ABC):
                 if "OptimisticConcurrencyError" in type(e).__name__ and attempt < MAX_OCC_RETRIES-1:
                     await asyncio.sleep(0.1 * (2**attempt)); continue
                 raise
+
+    async def _append_with_retry(self, stream_id: str, events: list[dict], causation_id: str = None) -> list[int]:
+        """Append multiple events to any aggregate stream with OCC retry. Returns stream positions."""
+        positions = []
+        for attempt in range(MAX_OCC_RETRIES):
+            try:
+                ver = await self.store.stream_version(stream_id)
+                await self.store.append(
+                    stream_id=stream_id,
+                    events=events,
+                    expected_version=ver,
+                    causation_id=causation_id
+                )
+                return [ver + i for i in range(len(events))]
+            except Exception as e:
+                if "OptimisticConcurrencyError" in type(e).__name__ and attempt < MAX_OCC_RETRIES-1:
+                    await asyncio.sleep(0.1 * (2**attempt)); continue
+                raise
+        return positions
 
     async def _call_llm(self, system, user, max_tokens=1024):
         if self._llm_client is None:
@@ -154,6 +206,17 @@ class BaseApexAgent(ABC):
 
     @staticmethod
     def _sha(d): return hashlib.sha256(json.dumps(str(d),sort_keys=True).encode()).hexdigest()[:16]
+
+    @staticmethod
+    def _parse_json(content: str) -> dict:
+        import re
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            match = re.search(r'\{.*\}', content, re.DOTALL)
+            if match:
+                return json.loads(match.group())
+            return {}
 
 
 class CreditAnalysisAgent(BaseApexAgent):
